@@ -3,6 +3,7 @@ import logging
 from typing import Callable, Dict, Any, Awaitable
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.types import TelegramObject
@@ -65,7 +66,10 @@ async def auto_initialize_system():
 async def main():
     logger.info(f"Запуск мультисерверного бота {config.BRAND_NAME}...")
     
-    bot = Bot(token=config.BOT_TOKEN.get_secret_value(), parse_mode="HTML")
+    bot = Bot(
+    token=config.BOT_TOKEN.get_secret_value(), 
+    default=DefaultBotProperties(parse_mode="HTML")
+)
     dp = Dispatcher(storage=MemoryStorage())
     
     dp.message.middleware(DbSessionMiddleware())
