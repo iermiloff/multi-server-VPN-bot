@@ -10,13 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.config import config
-from bot.database.models import (
+from config import config
+from database.models import (
     User, PartnerChannel, Subscription, 
     VPNKey, Server, TariffInbound, SubscriptionType
 )
-from bot.services.xui import XUIMultiClient
-from bot.services.cryptobot import cryptobot_client 
+from services.xui import XUIMultiClient
+from services.cryptobot import cryptobot_client 
 
 logger = logging.getLogger(__name__)
 user_router = Router()
