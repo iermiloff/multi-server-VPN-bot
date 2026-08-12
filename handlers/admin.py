@@ -8,9 +8,9 @@ from aiogram.fsm.state import StatesGroup, State
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.config import config
-from bot.database.models import Server, TariffInbound, PartnerChannel, SubscriptionType
-from bot.services.xui import XUIMultiClient
+from config import config
+from database.models import Server, TariffInbound, PartnerChannel, SubscriptionType
+from services.xui import XUIMultiClient
 
 logger = logging.getLogger(__name__)
 admin_router = Router()
