@@ -5,7 +5,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     BOT_TOKEN: SecretStr
     ADMIN_IDS: List[int]
-    
+
+    # CryptoBot
+    CRYPTO_BOT_TOKEN: SecretStr
+    CRYPTO_BOT_NET: bool = False
+
     # Настройки СУБД PostgreSQL
     DB_HOST: str
     DB_PORT: int
