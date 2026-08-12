@@ -7,13 +7,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.types import TelegramObject
 from sqlalchemy import select
+from config import config
+from database.db_helper import db_helper
+from database.models import PartnerChannel
+from handlers.user import user_router
+from handlers.admin import admin_router
+from services.scheduler import setup_scheduler
 
-from bot.config import config
-from bot.database.db_helper import db_helper
-from bot.database.models import PartnerChannel
-from bot.handlers.user import user_router
-from bot.handlers.admin import admin_router
-from bot.services.scheduler import setup_scheduler
 
 # Настройка логирования для продакшена
 logging.basicConfig(
