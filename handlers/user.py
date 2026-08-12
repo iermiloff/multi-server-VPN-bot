@@ -287,3 +287,138 @@ async def cb_generate_invoice(callback: CallbackQuery):
             text="❌ Не удалось связаться с CryptoBot. Пожалуйста, попробуйте позже.",
             reply_markup=get_main_menu_keyboard()
         )
+
+# handlers/user.py — ЧАСТЬ 4 (ПОЛОВИНА 4.1)
+
+@user_router.callback_query(F.data == "menu_partner_gift")
+async def cb_menu_partner_gift(callback: CallbackQuery, db_session: AsyncSession):
+    """Экран с условиями получения бесплатного месяца от партнеров"""
+    await callback.answer()
+    now = datetime.datetime.utcnow()
+    
+    # 1. Загружаем пользователя для проверки КД (раз в 30 дней)
+    stmt = select(User).where(User.telegram_id == callback.from_user.id)
+    res = await db_session.execute(stmt)
+    user = res.scalar_one()
+    
+    if user.last_partner_trial:
+        days_passed = (now - user.last_partner_trial).days
+        if days_passed < 30:
+            await callback.message.edit_text(
+                text=f"❌ <b>Доступ уже запрашивался!</b>\n\nПовторно акция будет доступна через {30 - days_passed} дн.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")
+                ]])
+            )
+            return
+
+    # 2. Собираем список партнерских каналов для подписки (где is_required=False)
+    stmt = select(PartnerChannel).where(PartnerChannel.is_required == False)
+    res = await db_session.execute(stmt)
+    channels = res.scalars().all()
+    
+    if not channels:
+        await callback.message.edit_text(
+            text="🎁 Извините, список партнеров временно пуст. Зайдите позже!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+
+    text = "🎁 <b>Месяц бесплатного VPN от партнеров!</b>\n\nПодпишитесь на каналы спонсоров:"
+    kb = []
+    for i, ch in enumerate(channels, 1):
+        text += f"\n{i}. {ch.channel_name}"
+        kb.append([InlineKeyboardButton(text=f"📢 Канал {i}", url=ch.invite_link)])
+        
+    kb.append([InlineKeyboardButton(text="✅ Проверить и получить месяц", callback_data="claim_partner_bonus")])
+    kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
+    
+    await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@user_router.callback_query(F.data == "claim_partner_bonus")
+async def cb_claim_partner_bonus(callback: CallbackQuery, db_session: AsyncSession, bot: Bot):
+    """Проверка подписок на всех спонсоров и запуск процесса активации"""
+    stmt = select(PartnerChannel).where(PartnerChannel.is_required == False)
+    res = await db_session.execute(stmt)
+    channels = res.scalars().all()
+    
+    # Жесткий цикл проверки через API Telegram
+    for ch in channels:
+        try:
+            m = await bot.get_chat_member(chat_id=ch.channel_id, user_id=callback.from_user.id)
+            if m.status in ["left", "kicked"]:
+                await callback.answer("❌ Вы подписались не на все каналы из списка!", show_alert=True)
+                return
+        except Exception:
+            await callback.answer("❌ Ошибка проверки бота в каналах. Обратитесь в саппорт.", show_alert=True)
+            return
+
+    await callback.message.edit_text("⏳ <i>Проверка пройдена! Нарезаем подписки на серверах...</i>")
+    
+    # Вызываем логику массового экспорта, которую опишем в половине 4.2
+    await provision_multiserver_subscription(callback, db_session)
+
+# handlers/user.py — ЧАСТЬ 4 (ПОЛОВИНА 4.2)
+
+async def provision_multiserver_subscription(callback: CallbackQuery, db_session: AsyncSession):
+    """Логика создания подписки и пуша на все активные 3x-ui панели"""
+    now = datetime.datetime.utcnow()
+    user_id = callback.from_user.id
+    
+    # 1. Извлекаем пользователя и фиксируем временную метку
+    stmt = select(User).where(User.telegram_id == user_id)
+    res = await db_session.execute(stmt)
+    user = res.scalar_one()
+    user.last_partner_trial = now
+    user.has_active_partner_bonus = True
+
+    # 2. Создаем подписку на 30 дней в базе бота
+    sub = Subscription(user_id=user_id, plan_type=SubscriptionType.BASE, expires_at=now + datetime.timedelta(days=30))
+    db_session.add(sub)
+    await db_session.flush() # Получаем ID созданной подписки
+
+    # 3. Находим все активные сервера и инбаунды тарифа BASE
+    servers_res = await db_session.execute(select(Server).where(Server.is_active == True))
+    servers = servers_res.scalars().all()
+    
+    # Генерируем уникальные email и sub_id на всю подписку
+    email = f"usr_{user_id}_{uuid.uuid4().hex[:4]}"
+    sub_id = uuid.uuid4().hex
+    success_nodes_count = 0
+
+    for srv in servers:
+        # Находим инбаунды, привязанные именно к этому серверу по его ID
+        ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type == SubscriptionType.BASE)
+        ib_res = await db_session.execute(ib_stmt)
+        inbound_ids = [ib.inbound_id for ib in ib_res.scalars().all()]
+        
+        if not inbound_ids:
+            continue # Пропускаем сервер, если для него админ еще не настроил инбаунды тарифа
+
+        # Создаем экземпляр API-клиента для этой ноды
+        xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
+        
+        # Пушим клиента на панель (эндпоинт /add со стр. 9 документации API)
+        success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=30)
+        
+        if success:
+            # Отрезаем от URL протокол/порт для формирования чистой ссылки подписки
+            clean_host = srv.api_url.replace("https://", "").replace("http://", "").split(":")[0]
+            # Формируем ссылку на Subscription Server панели (работает на кастомном sub_port)
+            subscribe_url = f"https://{clean_host}:{srv.sub_port}/sub/{sub_id}"
+            
+            # Сохраняем ссылку в базу бота
+            key_record = VPNKey(subscription_id=sub.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=subscribe_url)
+            db_session.add(key_record)
+            success_nodes_count += 1
+
+    if success_nodes_count > 0:
+        await db_session.commit()
+        await callback.message.answer(
+            text=f"🎉 <b>Успешно активировано!</b>\n\nВам начислен 1 месяц подписки BASE. Ссылки на подключение ко всем серверам сети ({success_nodes_count} шт.) уже доступны в вашем личном кабинете!"
+        )
+    else:
+        await db_session.rollback()
+        await callback.message.answer(
+            text="❌ Произошла техническая ошибка на стороне серверов. Пожалуйста, обратитесь в поддержку."
+        )
