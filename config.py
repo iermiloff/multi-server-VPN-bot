@@ -1,27 +1,14 @@
 # config.py
-from typing import List, Annotated, Any
+from typing import List, Any
 from pydantic import SecretStr, BeforeValidator
-from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
-
-def parse_comma_separated_ids(value: Any) -> List[int]:
-    """Безопасно преобразует любую строку вида 123 или 123,456 в список чисел"""
-    if not value:
-        return []
-    if isinstance(value, int):
-        return [value]
-    if isinstance(value, str):
-        # Разбиваем по запятой, убираем пробелы и фильтруем только пустые элементы
-        return [int(x.strip()) for x in value.split(",") if x.strip()]
-    return value
-
-# Создаем кастомный тип: отключаем JSON-декодер и вешаем наш безопасный парсер
-AdminIdsList = Annotated[List[int], NoDecode, BeforeValidator(parse_comma_separated_ids)]
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 
 class Settings(BaseSettings):
     BOT_TOKEN: SecretStr
     
-    # Теперь тип данных защищен от любых форматов ввода пользователя
-    ADMIN_IDS: AdminIdsList
+    # Считываем как строку, чтобы Pydantic не пытался декорировать её как JSON
+    ADMIN_IDS: str
     
     # Настройки СУБД PostgreSQL
     DB_HOST: str
@@ -43,6 +30,18 @@ class Settings(BaseSettings):
     PRICE_PREMIUM_6_MONTHS: float = 38.4
     PAYMENT_CURRENCY: str = "USDT"
     BRAND_NAME: str = "Overlord Multi-VPN"
+
+    @field_validator("ADMIN_IDS", mode="before")
+    @classmethod
+    def parse_admin_ids(cls, value: Any) -> List[int]:
+        """Безопасно преобразует строку '123' или '123,456' в список чисел"""
+        if not value:
+            return []
+        if isinstance(value, int):
+            return [value]
+        if isinstance(value, str):
+            return [int(x.strip()) for x in value.split(",") if x.strip()]
+        return value
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
