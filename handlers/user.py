@@ -393,14 +393,26 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
     sub_id = uuid.uuid4().hex
     success_nodes_count = 0
 
+    # Исправленный блок подбора инбаундов внутри provision_multiserver_subscription:
     for srv in servers:
-        # Находим инбаунды, привязанные именно к этому серверу по его ID
-        ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type == SubscriptionType.BASE)
+        # Если у юзера PREMIUM, выбираем порты из обоих тарифов. Если BASE — только из BASE.
+        if sub.plan_type == SubscriptionType.PREMIUM:
+            ib_stmt = select(TariffInbound).where(
+                TariffInbound.server_id == srv.id,
+                TariffInbound.plan_type.in_([SubscriptionType.BASE, SubscriptionType.PREMIUM])
+            )
+        else:
+            ib_stmt = select(TariffInbound).where(
+                TariffInbound.server_id == srv.id,
+                TariffInbound.plan_type == SubscriptionType.BASE
+            )
+            
         ib_res = await db_session.execute(ib_stmt)
         inbound_ids = [ib.inbound_id for ib in ib_res.scalars().all()]
         
         if not inbound_ids:
-            continue # Пропускаем сервер, если для него админ еще не настроил инбаунды тарифа
+            continue
+
 
         # Создаем экземпляр API-клиента для этой ноды
         xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
