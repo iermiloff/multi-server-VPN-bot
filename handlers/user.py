@@ -307,12 +307,19 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
     now = datetime.datetime.utcnow()
     user_id = callback.from_user.id
     
-    stmt = select(User).where(User.telegram_id == user_id)
+    # ИСПРАВЛЕНО: Явно подгружаем required_channels через selectinload, чтобы избежать MissingGreenlet
+    stmt = (
+        select(User)
+        .where(User.telegram_id == user_id)
+        .options(selectinload(User.required_channels))
+    )
     res = await db_session.execute(stmt)
     user = res.scalar_one()
+    
     user.last_partner_trial = now
     user.has_active_partner_bonus = True
 
+    # Теперь связь в памяти, и мы можем безопасно её перезаписать
     channels_stmt = select(PartnerChannel).where(PartnerChannel.is_required == False)
     channels_res = await db_session.execute(channels_stmt)
     current_channels = channels_res.scalars().all()
