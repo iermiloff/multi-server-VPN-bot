@@ -1,7 +1,7 @@
 # database/db_helper.py — ЧАСТЬ 3 (ПОЛОВИНА 3.1)
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from bot.config import config
+from config import config
 
 logger = logging.getLogger(__name__)
 
