@@ -5,6 +5,8 @@ from sqlalchemy import String, BigInteger, DateTime, Boolean, ForeignKey, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import Table, Column
 
+class Base(DeclarativeBase):
+    pass
 # Промежуточная таблица связей "Многие-ко-Многим" между юзером и его списком спонсоров
 user_partner_channels = Table(
     "user_partner_channels",
@@ -12,9 +14,6 @@ user_partner_channels = Table(
     Column("user_id", BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), primary_key=True),
     Column("channel_id", BigInteger, ForeignKey("partner_channels.channel_id", ondelete="CASCADE"), primary_key=True),
 )
-
-class Base(DeclarativeBase):
-    pass
 
 class SubscriptionType(str, Enum):
     BASE = "base"
