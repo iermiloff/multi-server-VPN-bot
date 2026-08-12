@@ -313,9 +313,15 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
     user.last_partner_trial = now
     user.has_active_partner_bonus = True
 
+    channels_stmt = select(PartnerChannel).where(PartnerChannel.is_required == False)
+    channels_res = await db_session.execute(channels_stmt)
+    current_channels = channels_res.scalars().all()
+    user.required_channels = current_channels
+
     sub = Subscription(user_id=user_id, plan_type=SubscriptionType.BASE, expires_at=now + datetime.timedelta(days=30))
     db_session.add(sub)
     await db_session.flush()
+
 
     servers_res = await db_session.execute(select(Server).where(Server.is_active == True))
     servers = servers_res.scalars().all()
