@@ -1,4 +1,4 @@
-# handlers/user.py — ШАГ 1 ИЗ 5
+# handlers/user.py — ШАГ 1 ИЗ 4
 import logging
 import uuid
 import datetime
@@ -40,16 +40,16 @@ async def check_main_channel_sub(bot: Bot, session: AsyncSession, user_id: int) 
         
     return False
 
-def get_main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Генерация кнопок главного меню"""
+def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Генерация кнопок главного меню с авто-кнопкой для админа"""
     keyboard = [
         [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="menu_profile")],
         [InlineKeyboardButton(text="💎 Купить подписку", callback_data="menu_buy")],
         [InlineKeyboardButton(text="🎁 Месяц от партнеров", callback_data="menu_partner_gift")]
     ]
+    if user_id in config.ADMIN_IDS:
+        keyboard.insert(0, [InlineKeyboardButton(text="👑 Панель управления", callback_data="adm_main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-# handlers/user.py — ШАГ 2 ИЗ 5
 
 def get_profile_keyboard() -> InlineKeyboardMarkup:
     """Кнопки внутри личного кабинета"""
@@ -58,6 +58,8 @@ def get_profile_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_to_main")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# handlers/user.py — ШАГ 2 ИЗ 4
 
 @user_router.message(CommandStart())
 async def cmd_start(message: Message, db_session: AsyncSession, bot: Bot):
@@ -88,24 +90,22 @@ async def cmd_start(message: Message, db_session: AsyncSession, bot: Bot):
 
     await message.answer(
         text=f"👋 Добро пожаловать в <b>{config.BRAND_NAME}</b>!\n\nИспользуйте меню ниже для управления вашим доступом:",
-        reply_markup=get_main_menu_keyboard()
+        reply_markup=get_main_menu_keyboard(message.from_user.id)
     )
 
 @user_router.callback_query(F.data == "check_sub_again")
 async def cb_check_sub_again(callback: CallbackQuery, db_session: AsyncSession, bot: Bot):
-    """Повторная проверка подписки на саппорт-канал при клике (Исправлено удаление)"""
+    """Повторная проверка подписки на саппорт-канал при клике"""
     if await check_main_channel_sub(bot, db_session, callback.from_user.id):
         await callback.answer("✅ Подписка подтверждена!")
         await bot.send_message(
             chat_id=callback.from_user.id,
             text="🎉 Отлично! Доступ открыт. Выберите нужный раздел:",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(callback.from_user.id)
         )
         await callback.message.delete()
     else:
         await callback.answer("❌ Вы всё еще не подписались на канал техподдержки!", show_alert=True)
-
-# handlers/user.py — ШАГ 3 ИЗ 5
 
 @user_router.callback_query(F.data == "menu_profile")
 async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
@@ -164,8 +164,22 @@ async def cb_back_to_main(callback: CallbackQuery):
     await callback.answer()
     await callback.message.edit_text(
         text=f"👋 Добро пожаловать в <b>{config.BRAND_NAME}</b>!\n\nИспользуйте меню ниже для управления вашим доступом:",
-        reply_markup=get_main_menu_keyboard()
+        reply_markup=get_main_menu_keyboard(callback.from_user.id)
     )
+
+# handlers/user.py — ШАГ 3 ИЗ 4
+
+def get_periods_keyboard(plan_type: str) -> InlineKeyboardMarkup:
+    """Выбор длительности подписки"""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="⏳ 1 Месяц", callback_data=f"buy_time_{plan_type}_30"),
+            InlineKeyboardButton(text="⏳ 3 Месяца (-10%)", callback_data=f"buy_time_{plan_type}_90")
+        ],
+        [InlineKeyboardButton(text="⏳ 6 Месяцев (-20%)", callback_data=f"buy_time_{plan_type}_180")],
+        [InlineKeyboardButton(text="◀️ Назад к тарифам", callback_data="menu_buy")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 @user_router.callback_query(F.data == "menu_buy")
 async def cb_menu_buy(callback: CallbackQuery):
@@ -193,20 +207,18 @@ async def cb_menu_buy(callback: CallbackQuery):
 async def cb_buy_plan(callback: CallbackQuery):
     """Экран выбора периода подписки"""
     await callback.answer()
-    plan_type = callback.data.split("_")[-1] # ИСПРАВЛЕНО ИНДЕКСАЦИЮ
+    plan_type = callback.data.split("_")[-1]
     
     text = "📅 <b>Выберите срок действия вашей подписки:</b>"
     await callback.message.edit_text(text=text, reply_markup=get_periods_keyboard(plan_type))
-
-# handlers/user.py — ШАГ 4 ИЗ 5
 
 @user_router.callback_query(F.data.startswith("buy_time_"))
 async def cb_generate_invoice(callback: CallbackQuery):
     """Генерация счета в CryptoBot для оплаты подписки"""
     await callback.answer()
     parts = callback.data.split("_")
-    plan_type = parts[2]  # ИСПРАВЛЕНО ИНДЕКСАЦИЮ
-    days = int(parts[3])  # ИСПРАВЛЕНО ИНДЕКСАЦИЮ
+    plan_type = parts[-2]
+    days = int(parts[-1])
     
     price = get_price(plan_type, days)
     asset = config.PAYMENT_CURRENCY
@@ -236,9 +248,10 @@ async def cb_generate_invoice(callback: CallbackQuery):
     else:
         await callback.message.edit_text(
             text="❌ Не удалось связаться с CryptoBot. Пожалуйста, попробуйте позже.",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(callback.from_user.id)
         )
-# handlers/user.py — ШАГ 5 ИЗ 5
+
+# handlers/user.py — ШАГ 4 ИЗ 4
 
 @user_router.callback_query(F.data == "menu_partner_gift")
 async def cb_menu_partner_gift(callback: CallbackQuery, db_session: AsyncSession):
@@ -268,7 +281,7 @@ async def cb_menu_partner_gift(callback: CallbackQuery, db_session: AsyncSession
     if not channels:
         await callback.message.edit_text(
             text="🎁 Извините, список партнеров временно пуст. Зайдите позже!",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(callback.from_user.id)
         )
         return
 
@@ -284,7 +297,7 @@ async def cb_menu_partner_gift(callback: CallbackQuery, db_session: AsyncSession
 
 @user_router.callback_query(F.data == "claim_partner_bonus")
 async def cb_claim_partner_bonus(callback: CallbackQuery, db_session: AsyncSession, bot: Bot):
-    """Проверка подписок и запуск активации"""
+    """Проверка подписок и запуск активации бонуса"""
     stmt = select(PartnerChannel).where(PartnerChannel.is_required == False)
     res = await db_session.execute(stmt)
     channels = res.scalars().all()
@@ -307,28 +320,19 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
     now = datetime.datetime.utcnow()
     user_id = callback.from_user.id
     
-    # ИСПРАВЛЕНО: Явно подгружаем required_channels через selectinload, чтобы избежать MissingGreenlet
-    stmt = (
-        select(User)
-        .where(User.telegram_id == user_id)
-        .options(selectinload(User.required_channels))
-    )
+    stmt = select(User).where(User.telegram_id == user_id).options(selectinload(User.required_channels))
     res = await db_session.execute(stmt)
     user = res.scalar_one()
-    
     user.last_partner_trial = now
     user.has_active_partner_bonus = True
 
-    # Теперь связь в памяти, и мы можем безопасно её перезаписать
     channels_stmt = select(PartnerChannel).where(PartnerChannel.is_required == False)
     channels_res = await db_session.execute(channels_stmt)
-    current_channels = channels_res.scalars().all()
-    user.required_channels = current_channels
+    user.required_channels = channels_res.scalars().all()
 
     sub = Subscription(user_id=user_id, plan_type=SubscriptionType.BASE, expires_at=now + datetime.timedelta(days=30))
     db_session.add(sub)
     await db_session.flush()
-
 
     servers_res = await db_session.execute(select(Server).where(Server.is_active == True))
     servers = servers_res.scalars().all()
@@ -359,19 +363,11 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
         success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=30)
         
         if success:
-            # 1. Автоматически определяем исходный протокол (HTTP или HTTPS) из api_url ноды
             protocol = "https" if srv.api_url.startswith("https") else "http"
-            
-            # 2. Очищаем хост от протоколов и слэшей
             raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
-            
-            # 3. Забираем чистый домен или IP (отбрасывая порт админ-панели)
             clean_host = raw_host.split(":")[0]
-            
-            # 4. Собираем идеальную ссылку с правильным протоколом и кастомным портом подписки
             subscribe_url = f"{protocol}://{clean_host}:{srv.sub_port}/sub/{sub_id}"
             
-            # Сохраняем запись в базу данных бота
             key_record = VPNKey(
                 subscription_id=sub.id, server_id=srv.id, 
                 client_email=email, sub_id=sub_id, config_data=subscribe_url
@@ -382,11 +378,10 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
     if success_nodes_count > 0:
         await db_session.commit()
         await callback.message.answer(
-            text=f"🎉 <b>Успешно активировано!</b>\n\nВам начислен 1 месяц подписки. Ссылки на подключение ко всем серверам сети ({success_nodes_count} шт.) уже доступны в вашем личном кабинете!"
+            text=f"🎉 <b>Успешно активировано!</b>\n\nВам начислен 1 месяц подписки. Ссылки на подключение ко всем серверам сети ({success_nodes_count} шт.) доступны в личном кабинете!"
         )
     else:
         await db_session.rollback()
         await callback.message.answer(
             text="❌ Произошла техническая ошибка на стороне ноды. Пожалуйста, обратитесь в поддержку."
         )
-
