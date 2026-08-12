@@ -34,9 +34,12 @@ class Settings(BaseSettings):
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod
     def parse_admin_ids(cls, value: Any) -> List[int]:
-        """Безопасно преобразует строку '123' или '123,456' в список чисел"""
+        """Универсальный парсер: обрабатывает строку, число или уже готовый список"""
         if not value:
             return []
+        # Если Pydantic уже распознал это как список 
+        if isinstance(value, list):
+            return [int(x) for x in value]
         if isinstance(value, int):
             return [value]
         if isinstance(value, str):
