@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     BOT_TOKEN: SecretStr
     
     # Считываем как строку, чтобы Pydantic не пытался декорировать её как JSON
-    ADMIN_IDS: str
+    ADMIN_IDS: Any
     
     # Настройки СУБД PostgreSQL
     DB_HOST: str
