@@ -359,11 +359,19 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
         success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=30)
         
         if success:
-            # ИСПРАВЛЕНО: Безопасное выделение чистого IP/хоста из URL для сборки саб-ссылки
-            raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
-            clean_host = raw_host.split(":")[0]
-            subscribe_url = f"https://{clean_host}:{srv.sub_port}/sub/{sub_id}"
+            # 1. Автоматически определяем исходный протокол (HTTP или HTTPS) из api_url ноды
+            protocol = "https" if srv.api_url.startswith("https") else "http"
             
+            # 2. Очищаем хост от протоколов и слэшей
+            raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
+            
+            # 3. Забираем чистый домен или IP (отбрасывая порт админ-панели)
+            clean_host = raw_host.split(":")[0]
+            
+            # 4. Собираем идеальную ссылку с правильным протоколом и кастомным портом подписки
+            subscribe_url = f"{protocol}://{clean_host}:{srv.sub_port}/sub/{sub_id}"
+            
+            # Сохраняем запись в базу данных бота
             key_record = VPNKey(
                 subscription_id=sub.id, server_id=srv.id, 
                 client_email=email, sub_id=sub_id, config_data=subscribe_url
