@@ -1,45 +1,82 @@
-# handlers/admin.py — ЧАСТЬ 1
+# handlers/admin.py — ШАГ 1 ИЗ 4
 import logging
+import datetime
 from aiogram import Router, Bot, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import config
-from database.models import Server, TariffInbound, PartnerChannel, SubscriptionType
+from database.models import Server, TariffInbound, PartnerChannel, SubscriptionType, User, Subscription
 from services.xui import XUIMultiClient
 
 logger = logging.getLogger(__name__)
 admin_router = Router()
 
-# Жесткий фильтр: только для ADMIN_IDS из .env
+# Жесткая защита: роутер обрабатывает сообщения ТОЛЬКО от администраторов из .env
 admin_router.message.filter(F.from_user.id.in_(config.ADMIN_IDS))
 admin_router.callback_query.filter(F.from_user.id.in_(config.ADMIN_IDS))
 
 class AdminServerStates(StatesGroup):
-    wait_for_name = State()     # Название сервера
-    wait_for_url = State()      # URL панели
-    wait_for_token = State()    # Bearer токен
-    wait_for_sub_port = State() # Порт подписки
+    wait_for_name = State()
+    wait_for_url = State()
+    wait_for_token = State()
+    wait_for_sub_port = State()
 
-# Исправленный хендлер в handlers/admin.py (Часть 1)
-@admin_router.message(Command("admin"))
-async def cmd_admin(message: Message):
-    """Главное меню админ-панели с динамическим брендом"""
-    kb = [
-        [InlineKeyboardButton(text="🖥 Управление серверами", callback_data="adm_servers_list")],
-        [InlineKeyboardButton(text="📢 Каналы-партнеры", callback_data="adm_partners_list")]
+async def get_admin_dashboard_text(db_session: AsyncSession) -> str:
+    """Собирает живую аналитику СУБД для вывода в админку"""
+    total_users = await db_session.scalar(select(func.count(User.telegram_id)))
+    
+    now = datetime.datetime.utcnow()
+    active_subs = await db_session.scalar(
+        select(func.count(Subscription.id))
+        .where(Subscription.is_active == True, Subscription.expires_at > now)
+    )
+    
+    total_servers = await db_session.scalar(select(func.count(Server.id)))
+    total_channels = await db_session.scalar(select(func.count(PartnerChannel.id)))
+
+    text = (
+        f"👑 <b>Панель управления {config.BRAND_NAME}</b>\n\n"
+        f"📊 <b>Глобальная статистика СУБД:</b>\n"
+        f"├ 👥 Всего пользователей: <code>{total_users or 0}</code>\n"
+        f"├ 🟢 Активных подписок: <code>{active_subs or 0}</code>\n"
+        f"├ 🖥 Подключено нод 3x-ui: <code>{total_servers or 0}</code>\n"
+        f"└ 📢 Каналов-партнеров: <code>{total_channels or 0}</code>\n\n"
+        f"💬 <i>Используйте интерактивное меню ниже для быстрого управления инфраструктурой вашего SaaS-VPN:</i>"
+    )
+    return text
+
+def get_admin_main_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура главного дашборда админки"""
+    keyboard = [
+        [InlineKeyboardButton(text="🖥 Управление серверами 3x-ui", callback_data="adm_servers_list")],
+        [InlineKeyboardButton(text="📢 Настройка каналов и спонсоров", callback_data="adm_partners_list")],
+        [InlineKeyboardButton(text="◀️ Выйти в меню пользователя", callback_data="back_to_main")]
     ]
-    # Теперь имя бренда берется строго из настроек окружения
-    await message.answer(f"👑 <b>Панель администратора {config.BRAND_NAME}</b>", 
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# handlers/admin.py — ШАГ 2 ИЗ 4
+
+@admin_router.message(Command("admin"))
+async def cmd_admin(message: Message, db_session: AsyncSession):
+    """Вызов админки через текстовую команду"""
+    text = await get_admin_dashboard_text(db_session)
+    await message.answer(text=text, reply_markup=get_admin_main_keyboard())
+
+@admin_router.callback_query(F.data == "adm_main_menu")
+async def cb_admin_main_menu(callback: CallbackQuery, db_session: AsyncSession):
+    """Возврат на главный дашборд админки из любого подменю управления"""
+    await callback.answer()
+    text = await get_admin_dashboard_text(db_session)
+    await callback.message.edit_text(text=text, reply_markup=get_admin_main_keyboard())
 
 @admin_router.callback_query(F.data == "adm_servers_list")
 async def cb_adm_servers_list(callback: CallbackQuery, db_session: AsyncSession):
-    """Вывод списка всех подключенных нод"""
+    """Вывод списка всех зарегистрированных нод 3x-ui"""
     await callback.answer()
     res = await db_session.execute(select(Server))
     servers = res.scalars().all()
@@ -47,44 +84,45 @@ async def cb_adm_servers_list(callback: CallbackQuery, db_session: AsyncSession)
     text = "🖥 <b>Список подключенных серверов 3x-ui:</b>\n\n"
     kb = []
     
+    if not servers:
+        text += "<i>Ноды еще не добавлены. Нажмите кнопку ниже для настройки.</i>\n\n"
     for s in servers:
         status = "✅" if s.is_active else "❌"
         text += f"{status} <b>{s.name}</b> (Порт подписки: {s.sub_port})\n<code>{s.api_url}</code>\n\n"
         kb.append([InlineKeyboardButton(text=f"⚙️ Настроить {s.name}", callback_data=f"adm_srv_manage_{s.id}")])
         
     kb.append([InlineKeyboardButton(text="➕ Добавить сервер", callback_data="adm_srv_add_start")])
+    kb.append([InlineKeyboardButton(text="◀️ В главное меню админа", callback_data="adm_main_menu")])
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @admin_router.callback_query(F.data == "adm_srv_add_start")
 async def cb_adm_srv_add_start(callback: CallbackQuery, state: FSMContext):
-    """Старт сценария добавления сервера"""
+    """Старт FSM сценария добавления сервера"""
     await callback.answer()
     await state.set_state(AdminServerStates.wait_for_name)
-    await callback.message.edit_text("📝 <b>Шаг 1/4:</b> Введите понятное название для сервера (например: <code>Германия #1</code>):")
+    await callback.message.edit_text("📝 <b>Шаг 1/4:</b> Введите название ноды (например: <code>Германия #1</code>):")
 
 @admin_router.message(AdminServerStates.wait_for_name)
 async def msg_srv_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await state.set_state(AdminServerStates.wait_for_url)
-    await message.answer("🔗 <b>Шаг 2/4:</b> Введите полный URL API панели (например: <code>https://123.45.67.89:2053</code>):")
+    await message.answer("🔗 <b>Шаг 2/4:</b> Введите URL API панели (например: <code>https://123.45.67.89:2053</code>):")
 
 @admin_router.message(AdminServerStates.wait_for_url)
 async def msg_srv_url(message: Message, state: FSMContext):
     await state.update_data(api_url=message.text.strip())
     await state.set_state(AdminServerStates.wait_for_token)
-    await message.answer("🔑 <b>Шаг 3/4:</b> Введите <b>API Token (Bearer)</b> панели.\n\n<i>Его можно взять в панели 3x-ui: Настройки панели -> Безопасность -> API Token.</i>")
+    await message.answer("🔑 <b>Шаг 3/4:</b> Введите <b>API Token (Bearer)</b> панели.\n\n<i>Найти его можно в панели: Настройки -> Безопасность -> API Token.</i>")
 
 @admin_router.message(AdminServerStates.wait_for_token)
 async def msg_srv_token(message: Message, state: FSMContext):
     await state.update_data(api_token=message.text.strip())
     await state.set_state(AdminServerStates.wait_for_sub_port)
     
-    # Даем подсказку администратору на основе скриншота настроек подписки
     hint_text = (
         "🔌 <b>Шаг 4/4: Введите порт подписки для этого сервера</b>\n\n"
-        "ℹ️ <i>По умолчанию в 3x-ui используется порт <b>2096</b>. Вы можете найти его в панели, "
-        "перейдя в <b>'Настройки панели' -> вкладка 'Подписка'</b>. Смотрите на значение в поле "
-        "'Порт подписки по умолчанию'.</i>"
+        "ℹ/ <i>По умолчанию используется порт <b>2096</b>. Вы можете найти его в панели, "
+        "перейдя в <b>'Настройки панели' -> вкладка 'Подписка'</b>.</i>"
     )
     await message.answer(text=hint_text)
 
@@ -99,7 +137,6 @@ async def msg_srv_sub_port(message: Message, state: FSMContext, db_session: Asyn
     data = await state.get_data()
     await state.clear()
     
-    # Сохраняем новую ноду в базу данных бота
     new_server = Server(
         name=data["name"],
         api_url=data["api_url"],
@@ -108,10 +145,9 @@ async def msg_srv_sub_port(message: Message, state: FSMContext, db_session: Asyn
     )
     db_session.add(new_server)
     await db_session.commit()
-    
-    await message.answer(f"✅ <b>Сервер '{data['name']}' успешно добавлен!</b>\n\nТеперь перейдите в его настройки, чтобы распределить локальные инбаунды по тарифам.")
+    await message.answer(f"✅ <b>Сервер '{data['name']}' успешно сохранен!</b>\n\nЗайдите в управление нодами, чтобы распределить входящие порты по тарифам.")
 
-# handlers/admin.py — ЧАСТЬ 2
+# handlers/admin.py — ШАГ 3 ИЗ 4
 
 @admin_router.callback_query(F.data.startswith("adm_srv_manage_"))
 async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
@@ -139,7 +175,6 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
         )
         return
 
-    # Загружаем текущие привязки инбаундов из БД
     ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id)
     ib_res = await db_session.execute(ib_stmt)
     db_inbounds = {i.inbound_id: i.plan_type for i in ib_res.scalars().all()}
@@ -155,7 +190,6 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
         ib_id = ib.get("id")
         current_plan = db_inbounds.get(ib_id, "❌ ОТКЛЮЧЕН")
         
-        # Красивые статус-бэджи для меню
         if current_plan == "base":
             badge = "🟢 BASE"
         elif current_plan == "premium":
@@ -169,13 +203,12 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-
 @admin_router.callback_query(F.data.startswith("adm_toggle_ib_"))
 async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
     """Циклическое переключение тарифа инбаунда: НЕАКТИВЕН -> BASE -> PREMIUM -> НЕАКТИВЕН"""
     parts = callback.data.split("_")
-    server_id = int(parts[3])
-    ib_id = int(parts[4])
+    server_id = int(parts[-2])
+    ib_id = int(parts[-1])
 
     stmt = select(Server).where(Server.id == server_id)
     res = await db_session.execute(stmt)
@@ -194,7 +227,6 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
     ib_record = ib_res.scalar_one_or_none()
 
     if not ib_record:
-        # 1. Если был отключен -> переводим в BASE
         new_record = TariffInbound(
             server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=ib_id,
             protocol_name=target_ib.get("protocol", "unknown"), port=target_ib.get("port", 0),
@@ -203,25 +235,22 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
         db_session.add(new_record)
         await callback.answer("🟢 Переведено в тариф BASE")
     elif ib_record.plan_type == SubscriptionType.BASE:
-        # 2. If был в BASE -> переводим в PREMIUM
         ib_record.plan_type = SubscriptionType.PREMIUM
         await callback.answer("💎 Переведено в тариф PREMIUM")
     else:
-        # 3. Если был в PREMIUM -> полностью отключаем
         await db_session.delete(ib_record)
         await callback.answer("⚫ Порт полностью деактивирован")
 
     await db_session.commit()
     await cb_adm_srv_manage(callback, db_session)
 
-
-# handlers/admin.py — ЧАСТЬ 3
+# handlers/admin.py — ШАГ 4 ИЗ 4
 
 class AdminPartnerStates(StatesGroup):
-    wait_for_id = State()     # Telegram ID канала (отрицательный)
-    wait_for_name = State()   # Название для отображения
-    wait_for_link = State()   # Инвайт-ссылка
-    wait_for_type = State()   # Тип: спонсор или саппорт
+    wait_for_id = State()
+    wait_for_name = State()
+    wait_for_link = State()
+    wait_for_type = State()
 
 @admin_router.callback_query(F.data == "adm_partners_list")
 async def cb_adm_partners_list(callback: CallbackQuery, db_session: AsyncSession):
@@ -242,7 +271,7 @@ async def cb_adm_partners_list(callback: CallbackQuery, db_session: AsyncSession
             kb.append([InlineKeyboardButton(text=f"❌ Удалить {ch.channel_name}", callback_data=f"adm_part_del_{ch.id}")])
             
     kb.append([InlineKeyboardButton(text="➕ Добавить канал", callback_data="adm_part_add_start")])
-    kb.append([InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_to_main")]) # использует глобальный триггер возврата
+    kb.append([InlineKeyboardButton(text="◀️ В главное меню админа", callback_data="adm_main_menu")])
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @admin_router.callback_query(F.data == "adm_part_add_start")
@@ -252,7 +281,7 @@ async def cb_adm_part_add_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminPartnerStates.wait_for_id)
     await callback.message.edit_text(
         "🆔 <b>Шаг 1/4:</b> Введите цифровой <b>Telegram ID канала</b>:\n"
-        "<i>(Обычно начинается на -100..., бот должен быть добавлен в этот канал как администратор)</i>"
+        "<i>(Должен начинаться на -100..., бот должен быть админом в этом канале)</i>"
     )
 
 @admin_router.message(AdminPartnerStates.wait_for_id)
@@ -264,7 +293,7 @@ async def msg_part_id(message: Message, state: FSMContext):
         return
     await state.update_data(channel_id=ch_id)
     await state.set_state(AdminPartnerStates.wait_for_name)
-    await message.answer("📝 <b>Шаг 2/4:</b> Введите название канала для отображения пользователям:")
+    await message.answer("📝 <b>Шаг 2/4:</b> Введите название канала для отображения:")
 
 @admin_router.message(AdminPartnerStates.wait_for_name)
 async def msg_part_name(message: Message, state: FSMContext):
@@ -278,14 +307,14 @@ async def msg_part_link(message: Message, state: FSMContext):
     await state.set_state(AdminPartnerStates.wait_for_type)
     
     kb = [
-        [InlineKeyboardButton(text="🎁 Спонсор (для бесплатного месяца)", callback_data="role_sponsor")],
-        [InlineKeyboardButton(text="🛠 Обязательный (техподдержка при старте)", callback_data="role_support")]
+        [InlineKeyboardButton(text="🎁 Спонсор (для бонусов)", callback_data="role_sponsor")],
+        [InlineKeyboardButton(text="🛠 Обязательный (саппорт-канал)", callback_data="role_support")]
     ]
     await message.answer("🎯 <b>Шаг 4/4:</b> Выберите назначение канала:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @admin_router.callback_query(AdminPartnerStates.wait_for_type, F.data.startswith("role_"))
 async def cb_part_finalize(callback: CallbackQuery, state: FSMContext, db_session: AsyncSession):
-    """Финал сохранения канала в БД"""
+    """Сохранение канала в БД"""
     await callback.answer()
     is_required = (callback.data == "role_support")
     
@@ -301,13 +330,12 @@ async def cb_part_finalize(callback: CallbackQuery, state: FSMContext, db_sessio
     db_session.add(new_channel)
     await db_session.commit()
     
-    await callback.message.edit_text(f"✅ <b>Канал '{data['channel_name']}' успешно зарегистрирован в СУБД!</b>")
-    # Возвращаем админа к общему списку каналов
+    await callback.message.edit_text(f"✅ <b>Канал '{data['channel_name']}' успешно сохранен!</b>")
     await cb_adm_partners_list(callback, db_session)
 
 @admin_router.callback_query(F.data.startswith("adm_part_del_"))
 async def cb_adm_part_del(callback: CallbackQuery, db_session: AsyncSession):
-    """Удаление канала спонсора/поддержки из системы"""
+    """Удаление партнерского канала"""
     ch_id = int(callback.data.split("_")[-1])
     stmt = select(PartnerChannel).where(PartnerChannel.id == ch_id)
     res = await db_session.execute(stmt)
@@ -321,3 +349,4 @@ async def cb_adm_part_del(callback: CallbackQuery, db_session: AsyncSession):
         await callback.answer("❌ Канал не найден.", show_alert=True)
         
     await cb_adm_partners_list(callback, db_session)
+
