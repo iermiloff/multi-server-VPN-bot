@@ -7,9 +7,9 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from bot.database.db_helper import db_helper
-from bot.database.models import User, Subscription, VPNKey
-from bot.services.xui import XUIMultiClient
+from bdatabase.db_helper import db_helper
+from database.models import User, Subscription, VPNKey
+from services.xui import XUIMultiClient
 
 logger = logging.getLogger(__name__)
 
