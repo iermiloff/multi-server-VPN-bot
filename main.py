@@ -32,7 +32,27 @@ class DbSessionMiddleware(BaseMiddleware):
             data["db_session"] = session
             return await handler(event, data)
 
-# main.py — ЧАСТЬ 1 (ПОЛОВИНА 1.2)
+from bot.database.models import PartnerChannel
+
+async def auto_initialize_system():
+    """Автоматически создает главный канал техподдержки, если бэкенд пустой"""
+    async with db_helper.session_factory() as session:
+        # Ищем, есть ли уже обязательный канал саппорта
+        stmt = select(PartnerChannel).where(PartnerChannel.is_required == True)
+        res = await session.execute(stmt)
+        main_channel = res.scalar_one_or_none()
+        
+        if not main_channel:
+            logger.info("⚙️ Первичный запуск: создаю заглушку главного канала поддержки...")
+            # Создаем системную заглушку. Админ сможет изменить её ID и ссылку позже через /admin
+            default_support = PartnerChannel(
+                channel_id=-1000000000000, # Системный ID-заглушка
+                channel_name="Служба поддержки (Настройте в /admin)",
+                invite_link="https://t.me", # Временная ссылка
+                is_required=True
+            )
+            session.add(default_support)
+            await session.commit()
 
 async def main():
     logger.info("Запуск мультисерверного бота Overlord VPN...")
