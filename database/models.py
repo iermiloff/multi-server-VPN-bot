@@ -3,6 +3,15 @@ from enum import Enum
 from typing import List, Optional
 from sqlalchemy import String, BigInteger, DateTime, Boolean, ForeignKey, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import Table, Column
+
+# Промежуточная таблица связей "Многие-ко-Многим" между юзером и его списком спонсоров
+user_partner_channels = Table(
+    "user_partner_channels",
+    Base.metadata,
+    Column("user_id", BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), primary_key=True),
+    Column("channel_id", BigInteger, ForeignKey("partner_channels.channel_id", ondelete="CASCADE"), primary_key=True),
+)
 
 class Base(DeclarativeBase):
     pass
@@ -43,6 +52,11 @@ class User(Base):
     last_free_trial: Mapped[Optional[datetime.datetime]] = mapped_column(nullable=True)
     last_partner_trial: Mapped[Optional[datetime.datetime]] = mapped_column(nullable=True)
     has_active_partner_bonus: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    required_channels: Mapped[List["PartnerChannel"]] = relationship(
+        secondary=user_partner_channels,
+        lazy="selectinload"
+    )
+
 
     subscriptions: Mapped[List["Subscription"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
