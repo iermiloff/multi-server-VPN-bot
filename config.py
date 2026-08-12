@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     PRICE_BASE_1_MONTH: float = 5.0
     PRICE_BASE_3_MONTHS: float = 13.5
     PRICE_BASE_6_MONTHS: float = 24.0
+    PRICE_PREMIUM_1_MONTH: float = 8.0
+    PRICE_PREMIUM_3_MONTHS: float = 21.6
+    PRICE_PREMIUM_6_MONTHS: float = 38.4
+
     PAYMENT_CURRENCY: str = "USDT"
     BRAND_NAME: str = "Overlord Multi-VPN"
 
