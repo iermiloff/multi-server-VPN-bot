@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  vpn_postgres_db:
+    image: postgres:15-alpine
+    container_name: vpn_postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  multi-server-vpn-bot:
+    build: .
+    container_name: multi-server-vpn-bot
+    restart: always
+    depends_on:
+      - vpn_postgres_db
+    env_file:
+      - .env
+
+volumes:
+  pgdata:
