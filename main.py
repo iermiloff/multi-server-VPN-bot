@@ -1,24 +1,27 @@
-# main.py — ЧАСТЬ 1 (ПОЛОВИНА 1.1)
 import asyncio
 import logging
+from typing import Callable, Dict, Any, Awaitable
+
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.types import TelegramObject
-from typing import Callable, Dict, Any, Awaitable
+from sqlalchemy import select
 
 from bot.config import config
 from bot.database.db_helper import db_helper
+from bot.database.models import PartnerChannel
 from bot.handlers.user import user_router
 from bot.handlers.admin import admin_router
 from bot.services.scheduler import setup_scheduler
 
-# Настройка логирования
+# Настройка логирования для продакшена
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
 
 class DbSessionMiddleware(BaseMiddleware):
     """Мидлварь для автоматического проброса сессии SQLAlchemy в хендлеры"""
@@ -32,7 +35,6 @@ class DbSessionMiddleware(BaseMiddleware):
             data["db_session"] = session
             return await handler(event, data)
 
-from bot.database.models import PartnerChannel
 
 async def auto_initialize_system():
     """Автоматически создает главный канал техподдержки, если бэкенд пустой"""
@@ -44,18 +46,20 @@ async def auto_initialize_system():
         
         if not main_channel:
             logger.info("⚙️ Первичный запуск: создаю заглушку главного канала поддержки...")
-            # Создаем системную заглушку. Админ сможет изменить её ID и ссылку позже через /admin
+            # Создаем системную заглушку. Админ изменит её ID и ссылку позже через /admin
             default_support = PartnerChannel(
-                channel_id=-1000000000000, # Системный ID-заглушка
+                channel_id=-1000000000000,  # Системный ID-заглушка
                 channel_name="Служба поддержки (Настройте в /admin)",
-                invite_link="https://t.me", # Временная ссылка
+                invite_link="https://t.me",  # Временная ссылка
                 is_required=True
             )
             session.add(default_support)
             await session.commit()
+            logger.info("✅ Системная заглушка успешно создана. База готова к работе.")
+
 
 async def main():
-    logger.info("Запуск мультисерверного бота Overlord VPN...")
+    logger.info(f"Запуск мультисерверного бота {config.BRAND_NAME}...")
     
     # Инициализация бота и диспетчера
     bot = Bot(token=config.BOT_TOKEN.get_secret_value(), parse_mode="HTML")
@@ -69,18 +73,23 @@ async def main():
     dp.include_router(admin_router)
     dp.include_router(user_router)
     
+    # Запускаем автоматическую настройку бэкенда (SaaS Zero-Config)
+    await auto_initialize_system()
+    
     # Инициализируем и запускаем планировщик проверки отписок
     scheduler = setup_scheduler(bot)
     scheduler.start()
     logger.info("Планировщик проверки партнерских подписок успешно запущен.")
     
     try:
-        # Запуск polling
+        # Запуск polling (пропускаем старые апдейты)
         await dp.start_polling(bot, skip_updates=True)
     finally:
-        # Корректное закрытие сессий при остановке бота
+        # Корректное закрытие сессий при остановке процесса контейнера
         scheduler.shutdown()
         await bot.session.close()
+        logger.info("Бот успешно остановлен.")
 
 if __name__ == "__main__":
     asyncio.run(main())
+
