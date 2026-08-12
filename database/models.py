@@ -52,8 +52,7 @@ class User(Base):
     last_partner_trial: Mapped[Optional[datetime.datetime]] = mapped_column(nullable=True)
     has_active_partner_bonus: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     required_channels: Mapped[List["PartnerChannel"]] = relationship(
-        secondary=user_partner_channels,
-        lazy="selectinload"
+        secondary=user_partner_channels
     )
 
 
