@@ -37,22 +37,19 @@ async def check_main_channel_sub(bot: Bot, session: AsyncSession, user_id: int) 
     except Exception as e:
         logger.error(f"Ошибка проверки главной подписки: {e}")
         return True
-        
     return False
 
-def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """Генерация кнопок главного меню с авто-кнопкой для админа"""
+def get_main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Генерация кнопок главного меню для обычных пользователей"""
     keyboard = [
         [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="menu_profile")],
         [InlineKeyboardButton(text="💎 Купить подписку", callback_data="menu_buy")],
         [InlineKeyboardButton(text="🎁 Месяц от партнеров", callback_data="menu_partner_gift")]
     ]
-    if user_id in config.ADMIN_IDS:
-        keyboard.insert(0, [InlineKeyboardButton(text="👑 Панель управления", callback_data="adm_main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_profile_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки внутри личного кабинета"""
+    """Кнопки внутри личного кабинета пользователя"""
     keyboard = [
         [InlineKeyboardButton(text="🔄 Обновить статус", callback_data="menu_profile")],
         [InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_to_main")]
@@ -63,7 +60,13 @@ def get_profile_keyboard() -> InlineKeyboardMarkup:
 
 @user_router.message(CommandStart())
 async def cmd_start(message: Message, db_session: AsyncSession, bot: Bot):
-    """Регистрация нового пользователя и стартовый экран"""
+    """Регистрация нового пользователя и жесткое разделение потоков"""
+    # РАЗДЕЛЕНИЕ ПОТОКОВ: Если пишет админ — сразу перенаправляем его в админку
+    if message.from_user.id in config.ADMIN_IDS:
+        from handlers.admin import cmd_admin
+        await cmd_admin(message, db_session)
+        return
+
     stmt = select(User).where(User.telegram_id == message.from_user.id)
     res = await db_session.execute(stmt)
     user = res.scalar_one_or_none()
@@ -90,7 +93,7 @@ async def cmd_start(message: Message, db_session: AsyncSession, bot: Bot):
 
     await message.answer(
         text=f"👋 Добро пожаловать в <b>{config.BRAND_NAME}</b>!\n\nИспользуйте меню ниже для управления вашим доступом:",
-        reply_markup=get_main_menu_keyboard(message.from_user.id)
+        reply_markup=get_main_menu_keyboard()
     )
 
 @user_router.callback_query(F.data == "check_sub_again")
@@ -101,7 +104,7 @@ async def cb_check_sub_again(callback: CallbackQuery, db_session: AsyncSession, 
         await bot.send_message(
             chat_id=callback.from_user.id,
             text="🎉 Отлично! Доступ открыт. Выберите нужный раздел:",
-            reply_markup=get_main_menu_keyboard(callback.from_user.id)
+            reply_markup=get_main_menu_keyboard()
         )
         await callback.message.delete()
     else:
@@ -109,7 +112,7 @@ async def cb_check_sub_again(callback: CallbackQuery, db_session: AsyncSession, 
 
 @user_router.callback_query(F.data == "menu_profile")
 async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
-    """Вывод личного кабинета со ссылками на все активные ноды"""
+    """Вывод личного кабинета пользователя со ссылками на все активные ноды"""
     await callback.answer()
     now = datetime.datetime.utcnow()
     
@@ -160,11 +163,11 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
 
 @user_router.callback_query(F.data == "back_to_main")
 async def cb_back_to_main(callback: CallbackQuery):
-    """Быстрый возврат на главный экран"""
+    """Быстрый возврат на главный экран пользователя"""
     await callback.answer()
     await callback.message.edit_text(
         text=f"👋 Добро пожаловать в <b>{config.BRAND_NAME}</b>!\n\nИспользуйте меню ниже для управления вашим доступом:",
-        reply_markup=get_main_menu_keyboard(callback.from_user.id)
+        reply_markup=get_main_menu_keyboard()
     )
 
 # handlers/user.py — ШАГ 3 ИЗ 4
@@ -180,6 +183,22 @@ def get_periods_keyboard(plan_type: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="◀️ Назад к тарифам", callback_data="menu_buy")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_price(plan_type: str, days: int) -> float:
+    """Динамический расчет цен на основе конфигурации .env"""
+    prices = {
+        "base": {
+            30: config.PRICE_BASE_1_MONTH, 
+            90: config.PRICE_BASE_3_MONTHS, 
+            180: config.PRICE_BASE_6_MONTHS
+        },
+        "premium": {
+            30: config.PRICE_PREMIUM_1_MONTH, 
+            90: config.PRICE_PREMIUM_3_MONTHS, 
+            180: config.PRICE_PREMIUM_6_MONTHS
+        }
+    }
+    return prices.get(plan_type, {}).get(days, 0.0)
 
 @user_router.callback_query(F.data == "menu_buy")
 async def cb_menu_buy(callback: CallbackQuery):
@@ -248,7 +267,7 @@ async def cb_generate_invoice(callback: CallbackQuery):
     else:
         await callback.message.edit_text(
             text="❌ Не удалось связаться с CryptoBot. Пожалуйста, попробуйте позже.",
-            reply_markup=get_main_menu_keyboard(callback.from_user.id)
+            reply_markup=get_main_menu_keyboard()
         )
 
 # handlers/user.py — ШАГ 4 ИЗ 4
@@ -281,7 +300,7 @@ async def cb_menu_partner_gift(callback: CallbackQuery, db_session: AsyncSession
     if not channels:
         await callback.message.edit_text(
             text="🎁 Извините, список партнеров временно пуст. Зайдите позже!",
-            reply_markup=get_main_menu_keyboard(callback.from_user.id)
+            reply_markup=get_main_menu_keyboard()
         )
         return
 
