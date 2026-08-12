@@ -14,13 +14,14 @@ class XUIMultiClient:
             "Authorization": f"Bearer {api_token}",
             "Content-Type": "application/json"
         }
-
+        
     async def _request(self, method: str, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         url = f"{self.base_url}/{path.lstrip('/')}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.request(method, url, headers=self.headers, json=json_data, timeout=10) as response:
-                    if response.status in:
+                    # ИСПРАВЛЕНО: проверяем успешные HTTP-статусы (200, 201)
+                    if response.status in (200, 201):
                         return await response.json()
                     logger.error(f"Ошибка API 3x-ui ({url}): Статус {response.status}")
                     return None
