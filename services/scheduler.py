@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from bdatabase.db_helper import db_helper
+from database.db_helper import db_helper
 from database.models import User, Subscription, VPNKey
 from services.xui import XUIMultiClient
 
