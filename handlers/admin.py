@@ -25,14 +25,16 @@ class AdminServerStates(StatesGroup):
     wait_for_token = State()    # Bearer токен
     wait_for_sub_port = State() # Порт подписки
 
+# Исправленный хендлер в handlers/admin.py (Часть 1)
 @admin_router.message(Command("admin"))
 async def cmd_admin(message: Message):
-    """Главное меню админ-панели"""
+    """Главное меню админ-панели с динамическим брендом"""
     kb = [
         [InlineKeyboardButton(text="🖥 Управление серверами", callback_data="adm_servers_list")],
         [InlineKeyboardButton(text="📢 Каналы-партнеры", callback_data="adm_partners_list")]
     ]
-    await message.answer("👑 <b>Панель администратора Overlord Multi-VPN</b>", 
+    # Теперь имя бренда берется строго из настроек окружения
+    await message.answer(f"👑 <b>Панель администратора {config.BRAND_NAME}</b>", 
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @admin_router.callback_query(F.data == "adm_servers_list")
