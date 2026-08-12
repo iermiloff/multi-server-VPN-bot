@@ -16,6 +16,7 @@ from bot.database.models import (
     VPNKey, Server, TariffInbound, SubscriptionType
 )
 from bot.services.xui import XUIMultiClient
+from bot.services.cryptobot import cryptobot_client 
 
 logger = logging.getLogger(__name__)
 user_router = Router()
@@ -27,7 +28,7 @@ async def check_main_channel_sub(bot: Bot, session: AsyncSession, user_id: int) 
     main_channel = res.scalar_one_or_none()
     
     if not main_channel or main_channel.channel_id == -1000000000000:
-        return True # Пропускаем, если канал еще не настроен админом
+        return True
         
     try:
         member = await bot.get_chat_member(chat_id=main_channel.channel_id, user_id=user_id)
@@ -45,6 +46,16 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="menu_profile")],
         [InlineKeyboardButton(text="💎 Купить подписку", callback_data="menu_buy")],
         [InlineKeyboardButton(text="🎁 Месяц от партнеров", callback_data="menu_partner_gift")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# handlers/user.py — ШАГ 2 ИЗ 5
+
+def get_profile_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки внутри личного кабинета"""
+    keyboard = [
+        [InlineKeyboardButton(text="🔄 Обновить статус", callback_data="menu_profile")],
+        [InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_to_main")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -82,26 +93,19 @@ async def cmd_start(message: Message, db_session: AsyncSession, bot: Bot):
 
 @user_router.callback_query(F.data == "check_sub_again")
 async def cb_check_sub_again(callback: CallbackQuery, db_session: AsyncSession, bot: Bot):
-    """Повторная проверка подписки на саппорт-канал при клике"""
+    """Повторная проверка подписки на саппорт-канал при клике (Исправлено удаление)"""
     if await check_main_channel_sub(bot, db_session, callback.from_user.id):
         await callback.answer("✅ Подписка подтверждена!")
-        await callback.message.delete()
-        await callback.message.answer(
+        await bot.send_message(
+            chat_id=callback.from_user.id,
             text="🎉 Отлично! Доступ открыт. Выберите нужный раздел:",
             reply_markup=get_main_menu_keyboard()
         )
+        await callback.message.delete()
     else:
         await callback.answer("❌ Вы всё еще не подписались на канал техподдержки!", show_alert=True)
 
-# handlers/user.py — ШАГ 2 ИЗ 5
-
-def get_profile_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки внутри личного кабинета"""
-    keyboard = [
-        [InlineKeyboardButton(text="🔄 Обновить статус", callback_data="menu_profile")],
-        [InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_to_main")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+# handlers/user.py — ШАГ 3 ИЗ 5
 
 @user_router.callback_query(F.data == "menu_profile")
 async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
@@ -126,11 +130,7 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
         return
         
     active_subs = [s for s in user.subscriptions if s.is_active and s.expires_at > now]
-    
-    profile_text = (
-        f"👤 <b>Личный кабинет</b>\n\n"
-        f"• Твой Telegram ID: <code>{user.telegram_id}</code>\n"
-    )
+    profile_text = f"👤 <b>Личный кабинет</b>\n\n• Твой Telegram ID: <code>{user.telegram_id}</code>\n"
     
     if not active_subs:
         profile_text += (
@@ -139,9 +139,7 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
             "активируйте бонус от партнеров в главном меню."
         )
     else:
-        profile_text += "• Статус подписки: ✅ <b>Активна</b>\n\n"
-        profile_text += "🔗 <b>Ваши персональные ссылки подписки:</b>\n"
-        
+        profile_text += "• Статус подписки: ✅ <b>Активна</b>\n\n🔗 <b>Ваши ссылки подписки:</b>\n"
         for sub in active_subs:
             expires_str = sub.expires_at.strftime("%d.%m.%Y %H:%M")
             profile_text += f"\nТариф: <b>{sub.plan_type.upper()}</b> (До: <code>{expires_str}</code>)\n"
@@ -153,10 +151,7 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                     server_name = key.server.name if key.server else "Сервер"
                     profile_text += f"├ 🌍 <b>{server_name}:</b> <code>{key.config_data}</code>\n"
                     
-        profile_text += (
-            "\n💡 <i>Нажмите на код ссылки выше, чтобы мгновенно скопировать её. "
-            "Затем импортируйте её в ваше приложение (v2rayNG, FoXray, Streisand).</i>"
-        )
+        profile_text += "\n💡 <i>Нажмите на код ссылки выше, чтобы скопировать её.</i>"
         
     try:
         await callback.message.edit_text(text=profile_text, reply_markup=get_profile_keyboard())
@@ -171,36 +166,6 @@ async def cb_back_to_main(callback: CallbackQuery):
         text=f"👋 Добро пожаловать в <b>{config.BRAND_NAME}</b>!\n\nИспользуйте меню ниже для управления вашим доступом:",
         reply_markup=get_main_menu_keyboard()
     )
-
-# handlers/user.py — ШАГ 3 ИЗ 5
-
-def get_periods_keyboard(plan_type: str) -> InlineKeyboardMarkup:
-    """Выбор длительности подписки"""
-    keyboard = [
-        [
-            InlineKeyboardButton(text="⏳ 1 Месяц", callback_data=f"buy_time_{plan_type}_30"),
-            InlineKeyboardButton(text="⏳ 3 Месяца (-10%)", callback_data=f"buy_time_{plan_type}_90")
-        ],
-        [InlineKeyboardButton(text="⏳ 6 Месяцев (-20%)", callback_data=f"buy_time_{plan_type}_180")],
-        [InlineKeyboardButton(text="◀️ Назад к тарифам", callback_data="menu_buy")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-def get_price(plan_type: str, days: int) -> float:
-    """Динамический расчет цен на основе .env"""
-    prices = {
-        "base": {
-            30: config.PRICE_BASE_1_MONTH, 
-            90: config.PRICE_BASE_3_MONTHS, 
-            180: config.PRICE_BASE_6_MONTHS
-        },
-        "premium": {
-            30: config.PRICE_PREMIUM_1_MONTH, 
-            90: config.PRICE_PREMIUM_3_MONTHS, 
-            180: config.PRICE_PREMIUM_6_MONTHS
-        }
-    }
-    return prices.get(plan_type, {}).get(days, 0.0)
 
 @user_router.callback_query(F.data == "menu_buy")
 async def cb_menu_buy(callback: CallbackQuery):
@@ -217,7 +182,6 @@ async def cb_menu_buy(callback: CallbackQuery):
         f"• Доступ ко ВСЕМ серверам сети + VIP-протоколы\n"
         f"• Цена: от <code>{config.PRICE_PREMIUM_1_MONTH}</code> {cur} / мес."
     )
-    
     kb = [
         [InlineKeyboardButton(text="⚡ Купить БАЗОВЫЙ", callback_data="buy_plan_base")],
         [InlineKeyboardButton(text="🔥 Купить ПРЕМИУМ", callback_data="buy_plan_premium")],
@@ -229,35 +193,30 @@ async def cb_menu_buy(callback: CallbackQuery):
 async def cb_buy_plan(callback: CallbackQuery):
     """Экран выбора периода подписки"""
     await callback.answer()
-    plan_type = callback.data.split("_")[2] # Исправлен индекс получения 'base' / 'premium'
+    plan_type = callback.data.split("_")[-1] # ИСПРАВЛЕНО ИНДЕКСАЦИЮ
     
     text = "📅 <b>Выберите срок действия вашей подписки:</b>"
     await callback.message.edit_text(text=text, reply_markup=get_periods_keyboard(plan_type))
 
 # handlers/user.py — ШАГ 4 ИЗ 5
-from bot.services.cryptobot import cryptobot_client 
 
 @user_router.callback_query(F.data.startswith("buy_time_"))
 async def cb_generate_invoice(callback: CallbackQuery):
     """Генерация счета в CryptoBot для оплаты подписки"""
     await callback.answer()
     parts = callback.data.split("_")
-    plan_type = parts[2]  # Исправлено считывание индексов
-    days = int(parts[3])  # Исправлено считывание индексов
+    plan_type = parts[2]  # ИСПРАВЛЕНО ИНДЕКСАЦИЮ
+    days = int(parts[3])  # ИСПРАВЛЕНО ИНДЕКСАЦИЮ
     
     price = get_price(plan_type, days)
     asset = config.PAYMENT_CURRENCY
-    
     await callback.message.edit_text("⏳ <i>Формирую счет на оплату, пожалуйста, подождите...</i>")
     
     payload = f"{callback.from_user.id}:{plan_type}:{days}"
     description = f"Оплата {config.BRAND_NAME}: тариф {plan_type.upper()} на {days} дней"
     
     invoice = await cryptobot_client.create_invoice(
-        amount=price,
-        asset=asset,
-        description=description,
-        payload=payload
+        amount=price, asset=asset, description=description, payload=payload
     )
     
     if invoice and invoice.get("bot_invoice_url"):
@@ -266,14 +225,12 @@ async def cb_generate_invoice(callback: CallbackQuery):
             [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_invoice_{invoice['invoice_id']}")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_buy")]
         ]
-        
         text = (
             f"🧾 <b>Счет успешно выставлен!</b>\n\n"
             f"• <b>Тариф:</b> {plan_type.upper()}\n"
             f"• <b>Срок:</b> {days} дней\n"
             f"• <b>К оплате:</b> <code>{invoice['amount']}</code> {asset}\n\n"
-            f"Нажмите кнопку ниже, перейдите в @CryptoBot и оплатите счет. "
-            f"После транзакции нажмите «Проверить оплату»."
+            f"Оплатите счет в @CryptoBot и нажмите «Проверить оплату»."
         )
         await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     else:
@@ -281,7 +238,6 @@ async def cb_generate_invoice(callback: CallbackQuery):
             text="❌ Не удалось связаться с CryptoBot. Пожалуйста, попробуйте позже.",
             reply_markup=get_main_menu_keyboard()
         )
-
 # handlers/user.py — ШАГ 5 ИЗ 5
 
 @user_router.callback_query(F.data == "menu_partner_gift")
@@ -324,7 +280,6 @@ async def cb_menu_partner_gift(callback: CallbackQuery, db_session: AsyncSession
         
     kb.append([InlineKeyboardButton(text="✅ Проверить и получить месяц", callback_data="claim_partner_bonus")])
     kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
-    
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @user_router.callback_query(F.data == "claim_partner_bonus")
@@ -370,7 +325,6 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
     success_nodes_count = 0
 
     for srv in servers:
-        # Проверяем уровень доступа: если PREMIUM — даем BASE+PREMIUM порты ноды
         if sub.plan_type == SubscriptionType.PREMIUM:
             ib_stmt = select(TariffInbound).where(
                 TariffInbound.server_id == srv.id,
@@ -392,8 +346,9 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
         success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=30)
         
         if success:
-            # ИСПРАВЛЕНО: Безопасное отсечение схемы и порта для чистой генерации Subscription Link
-            clean_host = srv.api_url.replace("https://", "").replace("http://", "").split(":")[0].strip("/")
+            # ИСПРАВЛЕНО: Безопасное выделение чистого IP/хоста из URL для сборки саб-ссылки
+            raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
+            clean_host = raw_host.split(":")[0]
             subscribe_url = f"https://{clean_host}:{srv.sub_port}/sub/{sub_id}"
             
             key_record = VPNKey(
@@ -411,5 +366,6 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
     else:
         await db_session.rollback()
         await callback.message.answer(
-            text="❌ Произошла техническая ошибка на стороне серверов ноды. Пожалуйста, обратитесь в поддержку."
+            text="❌ Произошла техническая ошибка на стороне ноды. Пожалуйста, обратитесь в поддержку."
         )
+
