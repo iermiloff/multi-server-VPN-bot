@@ -235,9 +235,16 @@ from bot.services.cryptobot import cryptobot_client # Импорт вашего 
 # Словарь для локального расчета стоимости на основе конфига
 def get_price(plan_type: str, days: int) -> float:
     prices = {
-        "base": {30: config.PRICE_BASE_1_MONTH, 
-                 90: config.PRICE_BASE_3_MONTHS, 
-                 180: config.PRICE_BASE_6_MONTHS}
+        "base": {
+            30: config.PRICE_BASE_1_MONTH, 
+            90: config.PRICE_BASE_3_MONTHS, 
+            180: config.PRICE_BASE_6_MONTHS
+        },
+        "premium": {
+            30: config.PRICE_PREMIUM_1_MONTH, 
+            90: config.PRICE_PREMIUM_3_MONTHS, 
+            180: config.PRICE_PREMIUM_6_MONTHS
+        }
     }
     return prices.get(plan_type, {}).get(days, 0.0)
 
