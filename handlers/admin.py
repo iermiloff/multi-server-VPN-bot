@@ -115,11 +115,10 @@ async def msg_srv_sub_port(message: Message, state: FSMContext, db_session: Asyn
 
 @admin_router.callback_query(F.data.startswith("adm_srv_manage_"))
 async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
-    """Экран управления конкретной нодой и её портами"""
+    """Экран управления конкретной нодой и её портами с поддержкой двух тарифов"""
     await callback.answer()
     server_id = int(callback.data.split("_")[-1])
     
-    # 1. Загружаем данные сервера из СУБД
     stmt = select(Server).where(Server.id == server_id)
     res = await db_session.execute(stmt)
     srv = res.scalar_one_or_none()
@@ -128,32 +127,41 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
         await callback.message.edit_text("❌ Сервер не найден.")
         return
 
-    # 2. Делаем запрос к панели 3x-ui через наш универсальный клиент
     xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
     all_inbounds = await xui.get_inbounds()
     
     if not all_inbounds:
         await callback.message.edit_text(
-            text=f"❌ Не удалось получить инбаунды с ноды <b>{srv.name}</b>.\nПроверьте URL, токен и статус сервера.",
+            text=f"❌ Не удалось получить инбаунды с ноды <b>{srv.name}</b>.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="◀️ Назад", callback_data="adm_servers_list")
             ]])
         )
         return
 
-    # 3. Смотрим, какие инбаунды уже привязаны в нашей СУБД к этому серверу
+    # Загружаем текущие привязки инбаундов из БД
     ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id)
     ib_res = await db_session.execute(ib_stmt)
     db_inbounds = {i.inbound_id: i.plan_type for i in ib_res.scalars().all()}
 
-    text = f"⚙️ <b>Настройка тарифов для ноды: {srv.name}</b>\n\nКликните по инбаунду, чтобы включить/выключить его привязку к тарифу BASE:\n\n"
+    text = (
+        f"⚙️ <b>Настройка тарифов для ноды: {srv.name}</b>\n\n"
+        f"Кликните по инбаунду, чтобы изменить его тарифный план. "
+        f"Пользователи тарифа PREMIUM автоматически получают доступ и к портам тарифа BASE:\n\n"
+    )
     kb = []
 
-    # 4. Формируем интерактивные кнопки
     for ib in all_inbounds:
         ib_id = ib.get("id")
         current_plan = db_inbounds.get(ib_id, "❌ ОТКЛЮЧЕН")
-        badge = "🟢 BASE" if current_plan == "base" else "🔴 НЕАКТИВЕН"
+        
+        # Красивые статус-бэджи для меню
+        if current_plan == "base":
+            badge = "🟢 BASE"
+        elif current_plan == "premium":
+            badge = "💎 PREMIUM"
+        else:
+            badge = "⚫ НЕАКТИВЕН"
         
         btn_text = f"[{ib_id}] {ib.get('protocol', '').upper()} ({ib.get('remark', '')}) -> {badge}"
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"adm_toggle_ib_{srv.id}_{ib_id}")])
@@ -161,14 +169,14 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
+
 @admin_router.callback_query(F.data.startswith("adm_toggle_ib_"))
 async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
-    """Переключение статуса инбаунда для конкретной ноды"""
+    """Циклическое переключение тарифа инбаунда: НЕАКТИВЕН -> BASE -> PREMIUM -> НЕАКТИВЕН"""
     parts = callback.data.split("_")
     server_id = int(parts[3])
     ib_id = int(parts[4])
 
-    # Получаем актуальные данные с панели для сохранения параметров порта
     stmt = select(Server).where(Server.id == server_id)
     res = await db_session.execute(stmt)
     srv = res.scalar_one()
@@ -178,34 +186,34 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
     target_ib = next((i for i in all_inbounds if i.get("id") == ib_id), None)
 
     if not target_ib:
-        await callback.answer("❌ Этот инбаунд больше не существует в панели 3x-ui!", show_alert=True)
+        await callback.answer("❌ Инбаунд не найден в панели!", show_alert=True)
         return
 
-    # Проверяем запись в нашей СУБД
     ib_stmt = select(TariffInbound).where(TariffInbound.server_id == server_id, TariffInbound.inbound_id == ib_id)
     ib_res = await db_session.execute(ib_stmt)
     ib_record = ib_res.scalar_one_or_none()
 
     if not ib_record:
-        # Если записи нет — добавляем в тариф BASE
+        # 1. Если был отключен -> переводим в BASE
         new_record = TariffInbound(
-            server_id=server_id,
-            plan_type=SubscriptionType.BASE,
-            inbound_id=ib_id,
-            protocol_name=target_ib.get("protocol", "unknown"),
-            port=target_ib.get("port", 0),
+            server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=ib_id,
+            protocol_name=target_ib.get("protocol", "unknown"), port=target_ib.get("port", 0),
             remark=target_ib.get("remark", "")
         )
         db_session.add(new_record)
-        await callback.answer("✨ Порт добавлен в тариф BASE!")
+        await callback.answer("🟢 Переведено в тариф BASE")
+    elif ib_record.plan_type == SubscriptionType.BASE:
+        # 2. If был в BASE -> переводим в PREMIUM
+        ib_record.plan_type = SubscriptionType.PREMIUM
+        await callback.answer("💎 Переведено в тариф PREMIUM")
     else:
-        # Если запись есть — удаляем (отключаем от тарифа)
+        # 3. Если был в PREMIUM -> полностью отключаем
         await db_session.delete(ib_record)
-        await callback.answer("🛑 Порт исключен из тарифа!")
+        await callback.answer("⚫ Порт полностью деактивирован")
 
     await db_session.commit()
-    # Обновляем экран управления нодой
     await cb_adm_srv_manage(callback, db_session)
+
 
 # handlers/admin.py — ЧАСТЬ 3
 
