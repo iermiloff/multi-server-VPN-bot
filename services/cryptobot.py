@@ -13,9 +13,9 @@ class CryptoBotClient:
         
         # Разделение официальных URL тестнета и майннета (стр. 3-4 документации)
         if config.CRYPTO_BOT_NET:
-            self.base_url = "https://pay.crypt.bot/"
+            self.base_url = "https://pay.crypt.bot/api/"
         else:
-            self.base_url = "https://testnet-pay.crypt.bot/"
+            self.base_url = "https://testnet-pay.crypt.bot/api/"
             
         self.headers = {
             "Crypto-Pay-API-Token": self.token,
