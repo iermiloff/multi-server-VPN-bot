@@ -77,7 +77,8 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Управление пользователями (CRM)", callback_data="adm_crm_menu")],
         [InlineKeyboardButton(text="🖥 Управление серверами 3x-ui", callback_data="adm_servers_list")],
-        [InlineKeyboardButton(text="📢 Настройка каналов и спонсоров", callback_data="adm_partners_list")]
+        [InlineKeyboardButton(text="📢 Настройка каналов и спонсоров", callback_data="adm_partners_list")],
+        [InlineKeyboardButton(text="💰 Выгрузить выплаты (Pro)", callback_data="adm_ref_payouts_list")]
     ])
 
 @admin_router.message(Command("admin"))
@@ -127,28 +128,53 @@ async def msg_adm_user_search_id(message: Message, state: FSMContext, db_session
         return
     await render_user_card(message, db_session, target_id)
 
+# handlers/admin.py — СТРАНИЦЫ 5–6
+
 async def render_user_card(message_obj: Any, db_session: AsyncSession, target_id: int, is_callback: bool = False):
+    # Подтягиваем новые реферальные поля пользователя
     stmt = select(User).where(User.telegram_id == target_id).options(selectinload(User.subscriptions).selectinload(Subscription.keys))
     res = await db_session.execute(stmt)
     user = res.scalar_one()
     now = datetime.datetime.utcnow()
+    
     u_str = f"@{user.username}" if user.username else "нет"
-    text = f"👤 <b>Карточка пользователя: {user.telegram_id}</b>\n\n• <b>Юзернейм:</b> {u_str}\n• <b>Регистрация:</b> {user.registered_at.strftime('%d.%m.%Y')}\n"
+    
+    # Формируем расширенный текст карточки с параметрами CPA
+    wallet_str = f"<code>{user.crypto_wallet}</code>" if user.crypto_wallet else "не указан"
+    ref_status = "👑 PRO (10% CPA)" if user.is_pro_ref else "👥 Обычный (1:1 дни)"
+    
+    text = (
+        f"👤 <b>Карточка пользователя: {user.telegram_id}</b>\n\n"
+        f"• <b>Юзернейм:</b> {u_str}\n"
+        f"• <b>Регистрация:</b> {user.registered_at.strftime('%d.%m.%Y')}\n"
+        f"• <b>Реф. программа:</b> {ref_status}\n"
+        f"• <b>Баланс PRO:</b> ${user.partner_balance_usd or 0.0:.2f}\n"
+        f"• <b>Кошелек TON:</b> {wallet_str}\n\n"
+        f"📋 <b>Действующие подписки:</b>\n"
+    )
     
     for s in user.subscriptions:
         if s.is_active:
-            status = "💤 В очереди" if s.is_pending else "🟢 Активна" if s.expires_at > now else "❌ Истекла"
-            text += f"  ├ <code>{s.plan_type.upper()}</code> -> {status} (До: {s.expires_at.strftime('%d.%m.%Y %H:%M')})\n"
-
+            status = " В очереди" if s.is_pending else " Активна" if s.expires_at > now else "❌ Истекла"
+            text += f" ├ <code>{s.plan_type.upper()}</code> -> {status} (До: {s.expires_at.strftime('%d.%m.%Y %H:%M')})\n"
+            
+    # Динамический текст кнопки переключения статуса
+    ref_btn_text = "👥 Вернуть обычный статус" if user.is_pro_ref else "👑 Сделать PRO-партнером (10%)"
+    
     kb = [
         [InlineKeyboardButton(text="➕ Начислить / Продлить подписку", callback_data=f"adm_crm_add_days_{target_id}")],
         [InlineKeyboardButton(text="🛑 Аннулировать все подписки", callback_data=f"adm_crm_wipe_subs_{target_id}")],
+        # ДОБАВИЛИ: Кнопка переключения реф-статуса
+        [InlineKeyboardButton(text=ref_btn_text, callback_data=f"adm_crm_toggle_pro_{target_id}")],
         [InlineKeyboardButton(text="🗑 Полностью удалить клиента из СУБД", callback_data=f"adm_crm_delete_user_{target_id}")],
-        [InlineKeyboardButton(text="◀️ Назад в CRM", callback_data="adm_crm_menu")]
+        [InlineKeyboardButton(text=" Назад в CRM", callback_data="adm_crm_menu")]
     ]
+    
+    if is_callback: 
+        await message_obj.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    else: 
+        await message_obj.answer(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-    if is_callback: await message_obj.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    else: await message_obj.answer(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @admin_router.callback_query(F.data.startswith("adm_user_card_"))
 async def cb_adm_user_card(callback: CallbackQuery, db_session: AsyncSession):
@@ -724,4 +750,66 @@ async def cb_part_del(callback: CallbackQuery, db_session: AsyncSession):
         await db_session.commit()
         await callback.answer("🗑 Канал успешно удален!")
     await cb_adm_partners_list(callback, db_session)
+
+# handlers/admin.py — КОНЕЦ ФАЙЛА (НОВЫЕ ПАРТНЕРСКИЕ ХЕНДЛЕРЫ)
+
+@admin_router.callback_query(F.data.startswith("adm_crm_toggle_pro_"))
+async def cb_adm_crm_toggle_pro(callback: CallbackQuery, db_session: AsyncSession):
+    """Переключение реферального статуса пользователя (Обычный <=> PRO)"""
+    await callback.answer()
+    target_id = int(callback.data.split("_")[-1])
+    
+    stmt = select(User).where(User.telegram_id == target_id)
+    res = await db_session.execute(stmt)
+    user = res.scalar_one_or_none()
+    
+    if not user:
+        await callback.answer("❌ Пользователь не найден.", show_alert=True)
+        return
+        
+    user.is_pro_ref = not user.is_pro_ref
+    await db_session.commit()
+    
+    status_msg = "сделан PRO-партнером! 👑" if user.is_pro_ref else "вернулся в обычный статус. 👥"
+    await callback.answer(f"Юзер {target_id} {status_msg}", show_alert=True)
+    await render_user_card(callback.message, db_session, target_id, is_callback=True)
+
+
+@admin_router.callback_query(F.data == "adm_ref_payouts_list")
+async def cb_adm_ref_payouts_list(callback: CallbackQuery, db_session: AsyncSession):
+    """Выгрузка списка Pro-партнеров с балансом > 0 для ручных выплат 1-го числа"""
+    await callback.answer()
+    
+    stmt = select(User).where(
+        User.is_pro_ref == True,
+        User.partner_balance_usd > 0.0
+    ).order_by(User.partner_balance_usd.desc())
+    
+    res = await db_session.execute(stmt)
+    partners = res.scalars().all()
+    
+    text = "💰 <b>Ведомость реферальных выплат Pro-партнерам:</b>\n\n"
+    
+    if not partners:
+        text += "<i>На текущий момент начислений к выплате не найдено.</i>"
+    else:
+        text += "📋 <b>Список кошельков для отправки наград (10% CPA):</b>\n\n"
+        total_payout_usd = 0.0
+        
+        for i, partner in enumerate(partners, 1):
+            username_str = f"@{partner.username}" if partner.username else f"ID: {partner.telegram_id}"
+            wallet_str = f"<code>{partner.crypto_wallet}</code>" if partner.crypto_wallet else "⚠️ <i>Кошелек не указан</i>"
+            
+            text += (
+                f"{i}. 👤 <b>{username_str}</b>\n"
+                f"├ К выплате: <b>${partner.partner_balance_usd:.2f}</b>\n"
+                f"└ TON кошелек: {wallet_str}\n\n"
+            )
+            total_payout_usd += partner.partner_balance_usd
+            
+        text += f"📊 <b>Итого к выплате по сети:</b> <code>${total_payout_usd:.2f}</code>\n\n"
+        text += "💡 <i>После ручной отправки монет TON, обнулите баланс партнера кнопкой сброса в его карточке CRM.</i>"
+        
+    kb = [[InlineKeyboardButton(text="◀️ В меню админа", callback_data="adm_main_menu")]]
+    await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
