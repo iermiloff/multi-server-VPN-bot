@@ -48,7 +48,9 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     referred_by: Mapped[int] = mapped_column(BigInteger, nullable=True)
     registered_at: Mapped[datetime.datetime] = mapped_column(default=datetime.datetime.utcnow)
-    
+    is_pro_ref: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("'0'"))
+    crypto_wallet: Mapped[str] = mapped_column(String(150), nullable=True)
+    partner_balance_usd: Mapped[float] = mapped_column(DateTime, default=0.0, server_default=text("'0.0'"))
     last_free_trial: Mapped[Optional[datetime.datetime]] = mapped_column(nullable=True)
     last_partner_trial: Mapped[Optional[datetime.datetime]] = mapped_column(nullable=True)
     has_active_partner_bonus: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
