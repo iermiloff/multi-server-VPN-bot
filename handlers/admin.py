@@ -340,7 +340,34 @@ async def msg_srv_token(message: Message, state: FSMContext):
         "ℹ <i>По умолчанию используется порт <b>2096</b>. Вы можете найти его в панели, "
         "перейдя в <b>'Настройки панели' -> вкладка 'Подписка'</b>.</i>"
     )
+    await state.set_state(AdminServerStates.wait_for_sub_path)
+    
+    hint_text = (
+        "🎭 <b>Шаг 5/5: Введите путь маскировки подписки</b>\n\n"
+        "<i>Введите кастомное значение, которое вы указали в настройках панели 3x-ui "
+        "(например: <code>stats</code>, <code>getsub</code> или оставьте дефолтный <code>sub</code> без слэшей):</i>"
+    )    
     await message.answer(text=hint_text)
+
+@admin_router.message(AdminServerStates.wait_for_sub_path)
+async def msg_srv_sub_path(message: Message, state: FSMContext, db_session: AsyncSession):
+    # Очищаем ввод от возможных случайных слэшей, введенных админой
+    sub_path = message.text.strip().strip("/")
+    
+    data = await state.get_data()
+    await state.clear()
+    
+    new_server = Server(
+        name=data["name"],
+        api_url=data["api_url"],
+        api_token=data["api_token"],
+        sub_port=data["sub_port"],
+        sub_path=sub_path  # Сохраняем кастомный путь
+    )
+    db_session.add(new_server)
+    await db_session.commit()
+    await message.answer(f"✅ <b>Сервер '{data['name']}' успешно сохранен с путем подписки /{sub_path}!</b>")
+
 
 @admin_router.message(AdminServerStates.wait_for_sub_port)
 async def msg_srv_sub_port(message: Message, state: FSMContext, db_session: AsyncSession):
