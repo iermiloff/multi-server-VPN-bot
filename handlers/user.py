@@ -179,9 +179,11 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                     if key.server:
                         srv = key.server
                         protocol = "https" if srv.api_url.startswith("https") else "http"
-                        raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
-                        clean_host = raw_host.split(":")
-                        dynamic_url = f"{protocol}://{clean_host}:{srv.sub_port}/{srv.sub_path}/{key.sub_id}"
+                        
+                        from urllib.parse import urlparse
+                        parsed_url = urlparse(srv.api_url)
+                        clean_host = parsed_url.netloc 
+                        dynamic_url = f"{protocol}://{clean_host}/{srv.sub_path}/{key.sub_id}"
                     else:
                         dynamic_url = "Ошибка: Сервер удален"
                         
