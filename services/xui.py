@@ -64,14 +64,13 @@ class XUIMultiClient:
         return update_success
 
 
-# services/xui.py — ШАГ 2 ИЗ 2 (ПРОДЛЕНИЕ ПО НОВОМУ СТАНДАРТУ)
-
     async def update_client_expiry(self, email: str, expiry_time: int) -> bool:
-        """Обновление времени действия клиента по новому стандарту мульти-API"""
+        """Обновление времени и ПЕРЕНАРЕЗКА портов существующего мульти-клиента по API"""
         inbounds = await self.get_inbounds()
         if not inbounds:
             return False
             
+        import json
         for ib in inbounds:
             settings = ib.get("settings", {})
             if isinstance(settings, str):
@@ -81,11 +80,19 @@ class XUIMultiClient:
             clients = settings.get("clients", [])
             for client in clients:
                 if client.get("email") == email:
-                    # Нашли клиента — отправляем обновление параметров на новый эндпоинт
+                    # Нашли старого клиента в панели!
                     client_id = client.get("id")
+                    
+                    # ИСПРАВЛЕНО: Формируем строгий, полный payload обновления.
+                    # Переписываем время окончания подписки под актуальные данные
                     client["expiryTime"] = expiry_time
                     
-                    # Используем современный эндпоинт обновления мульти-клиента
+                    # Если у вас в методе add_client собирается кастомный inboundIds,
+                    # то для обновления мы передаем текущий inbound_id этого порта
+                    if "inboundIds" not in client:
+                        client["inboundIds"] = [ib.get("id")]
+                    
+                    # Отправляем обновленный объект мульти-клиента на панель
                     path = f"panel/api/clients/update/{client_id}"
                     res = await self._request("POST", path, json_data=client)
                     return res is not None and res.get("success", False)
