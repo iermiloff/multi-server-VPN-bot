@@ -204,9 +204,10 @@ async def cb_adm_crm_select_plan(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await callback.message.edit_text(text=f"⏳ Введите количество дней подписки (числом) для тарифа <b>{plan_type.upper()}</b> пользователю <code>{data['target_id']}</code>:")
 
+# handlers/admin.py — ПОЛНОСТЬЮ ОБНОВЛЕННЫЙ ХЕНДЛЕР НАЧИСЛЕНИЯ ДНЕЙ С КАСКАДНЫМ ПУШЕМ НА СЕРВЕРА
+
 @admin_router.message(AdminCrmStates.wait_for_days_count)
 async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session: AsyncSession):
-    # ЗАЩИТА: Сброс при вводе слэш-команды
     if message.text.startswith("/"):
         await state.clear()
         await cmd_admin(message, db_session)
@@ -217,6 +218,7 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
     except ValueError:
         await message.answer("❌ Количество дней должно быть целым числом! Попробуйте еще раз:")
         return
+        
     data = await state.get_data()
     await state.clear()
     
@@ -224,38 +226,107 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
     plan_type = data["plan_type"]
     now = datetime.datetime.utcnow()
     
-    stmt = select(Subscription).where(Subscription.user_id == target_id, Subscription.plan_type == plan_type).order_by(Subscription.expires_at.desc()).limit(1)
+    # 1. Рассчитываем и обновляем целевую подписку в СУБД
+    stmt = select(Subscription).where(
+        Subscription.user_id == target_id, 
+        Subscription.plan_type == plan_type
+    ).order_by(Subscription.expires_at.desc()).limit(1)
     res = await db_session.execute(stmt)
     existing_sub = res.scalar_one_or_none()
     
     if existing_sub and existing_sub.expires_at > now:
         existing_sub.expires_at += datetime.timedelta(days=days)
-        end_date = existing_sub.expires_at
+        target_sub = existing_sub
     else:
-        new_sub = Subscription(user_id=target_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days))
-        db_session.add(new_sub)
-        end_date = new_sub.expires_at
+        target_sub = Subscription(user_id=target_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days))
+        db_session.add(target_sub)
         
-    await db_session.commit()
-    await message.answer(f"✅ Успешно начислено <b>{days} дн.</b> тарифа {plan_type.upper()}! До: <code>{end_date.strftime('%d.%m.%Y %H:%M')}</code>")
+    await db_session.flush() # Получаем id подписки в СУБД
+    end_date = target_sub.expires_at
     
-    # АВТО-ВОЗВРАТ: Сразу возвращаем админа в карточку пользователя
-    await render_user_card(message, db_session, target_id)
+    # 2. БИЗНЕС-ПРАВИЛО: Выравниваем время тарифов, чтобы СУБД не сошла с ума при разных инбаундах
+    if plan_type == SubscriptionType.PREMIUM:
+        base_stmt = select(Subscription).where(
+            Subscription.user_id == target_id, 
+            Subscription.plan_type == SubscriptionType.BASE
+        ).order_by(Subscription.expires_at.desc()).limit(1)
+        base_res = await db_session.execute(base_stmt)
+        base_sub = base_res.scalar_one_or_none()
+        
+        if base_sub and base_sub.expires_at < end_date:
+            base_sub.expires_at = end_date # Подтягиваем BASE до уровня PREMIUM
+            logger.info(f"Синхронизация СУБД: Время тарифа BASE для пользователя {target_id} выровнено до {end_date}")
 
-@admin_router.callback_query(F.data.startswith("adm_crm_wipe_subs_"))
-async def cb_adm_crm_wipe_subs(callback: CallbackQuery, db_session: AsyncSession):
-    await callback.answer()
-    target_id = int(callback.data.split("_")[-1])
-    await deactivate_user_on_servers(db_session, target_id)
+    # 3. КАСКАДНЫЙ ПУШ: Автоматически заводим пользователя на ВСЕ подходящие сервера сети по API 3x-ui
+    servers_res = await db_session.execute(select(Server).where(Server.is_active == True))
+    servers = servers_res.scalars().all()
     
-    stmt = select(Subscription).where(Subscription.user_id == target_id)
-    res = await db_session.execute(stmt)
-    for s in res.scalars().all():
-        s.is_active = False
+    email = f"usr_{target_id}_{uuid.uuid4().hex[:4]}"
+    sub_id = uuid.uuid4().hex
+    nodes_synced = 0
+
+    # Подгружаем уже имеющиеся ключи, чтобы не создавать дубликаты аккаунтов на тех нодах, где юзер уже есть
+    keys_stmt = select(VPNKey).join(Subscription).where(Subscription.user_id == target_id)
+    keys_res = await db_session.execute(keys_stmt)
+    existing_keys = {k.server_id: k for k in keys_res.scalars().all()}
+
+    for srv in servers:
+        # Определяем, какие порты заводить в зависимости от начисленного тарифа
+        if plan_type == SubscriptionType.PREMIUM:
+            ib_stmt = select(TariffInbound).where(
+                TariffInbound.server_id == srv.id,
+                TariffInbound.plan_type.in_([SubscriptionType.BASE, SubscriptionType.PREMIUM])
+            )
+        else:
+            ib_stmt = select(TariffInbound).where(
+                TariffInbound.server_id == srv.id,
+                TariffInbound.plan_type == SubscriptionType.BASE
+            )
+            
+        ib_res = await db_session.execute(ib_stmt)
+        inbound_ids = [ib.inbound_id for ib in ib_res.scalars().all()]
         
+        if not inbound_ids:
+            continue
+
+        xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
+        
+        # Если пользователя на этом сервере еще нет — создаем его начисто по API
+        if srv.id not in existing_keys:
+            success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days)
+            if success:
+                protocol = "https" if srv.api_url.startswith("https") else "http"
+                raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
+                clean_host = raw_host.split(":")
+                subscribe_url = f"{protocol}://{clean_host}:{srv.sub_port}/{srv.sub_path}/{sub_id}"
+                
+                key_record = VPNKey(
+                    subscription_id=target_sub.id, server_id=srv.id, 
+                    client_email=email, sub_id=sub_id, config_data=subscribe_url
+                )
+                db_session.add(key_record)
+                nodes_synced += 1
+        else:
+            # Если пользователь уже заведен на сервере — просто продлеваем его работу в панели 3x-ui по API
+            current_key = existing_keys[srv.id]
+            # Передаем обновленное время окончания в миллисекундах для панели 3x-ui
+            expiry_timestamp = int(end_date.timestamp() * 1000)
+            await xui.update_client_expiry(email=current_key.client_email, expiry_time=expiry_timestamp)
+            nodes_synced += 1
+
     await db_session.commit()
-    await callback.answer("🗑 Все доступы аннулированы, клиент очищен с серверов!", show_alert=True)
-    await render_user_card(callback.message, db_session, target_id, is_callback=True)
+    
+    msg_text = (
+        f"✅ <b>Успешное ручное начисление!</b>\n\n"
+        f"• Пользователь: <code>{target_id}</code>\n"
+        f"• Тариф: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n"
+        f"• Дата окончания: <code>{end_date.strftime('%d.%m.%Y %H:%M')}</code>\n"
+        f"• Синхронизировано серверов: <b>{nodes_synced} шт.</b>"
+    )
+    await message.answer(text=msg_text)
+    
+    # Возвращаем админа в карточку пользователя CRM
+    await render_user_card(message, db_session, target_id)
 
 # handlers/admin.py — ШАГ 4 ИЗ 5
 
