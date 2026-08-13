@@ -418,46 +418,70 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
+# handlers/admin.py — ИСПРАВЛЕННЫЙ ХЕНДЛЕР С УЧЕТОМ ДЛИННЫХ UUID СЭНДВИЧЕЙ
+
 @admin_router.callback_query(F.data.startswith("adm_toggle_ib_"))
 async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
     """Циклическое переключение тарифа инбаунда: НЕАКТИВЕН -> BASE -> PREMIUM -> НЕАКТИВЕН"""
-    parts = callback.data.split("_")
-    server_id = int(parts[-2])
-    ib_id = int(parts[-1])
+    # Удаляем префикс, чтобы осталась только дата: "IDСЕРВЕРА_IDИНБАУНДА"
+    raw_data = callback.data.replace("adm_toggle_ib_", "")
+    
+    # Разбиваем строго по первому знаку подчеркивания
+    # maxsplit=1 гарантирует, что даже если в UUID инбаунда куча подчеркиваний, они не разобьются
+    parts = raw_data.split("_", 1)
+    
+    server_id = int(parts[0])
+    ib_id = int(parts[1]) if parts[1].isdigit() else parts[1] # Поддержка и чисел, и строковых UUID
 
     stmt = select(Server).where(Server.id == server_id)
     res = await db_session.execute(stmt)
-    srv = res.scalar_one()
+    srv = res.scalar_one_or_none()
+
+    if not srv:
+        await callback.answer("❌ Сервер базы данных не найден!", show_alert=True)
+        return
 
     xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
     all_inbounds = await xui.get_inbounds()
-    target_ib = next((i for i in all_inbounds if i.get("id") == ib_id), None)
+    
+    # Ищем инбаунд в панели (сравниваем типы данных динамически)
+    target_ib = next((i for i in all_inbounds if str(i.get("id")) == str(ib_id)), None)
 
     if not target_ib:
-        await callback.answer("❌ Инбаунд не найден в панели!", show_alert=True)
+        await callback.answer("❌ Инбаунд не найден в панели 3x-ui!", show_alert=True)
         return
 
-    ib_stmt = select(TariffInbound).where(TariffInbound.server_id == server_id, TariffInbound.inbound_id == ib_id)
+    # В таблице БД inbound_id храним как String, чтобы поддерживать UUID-панели
+    ib_stmt = select(TariffInbound).where(
+        TariffInbound.server_id == server_id, 
+        func.cast(TariffInbound.inbound_id, String) == str(ib_id)
+    )
     ib_res = await db_session.execute(ib_stmt)
     ib_record = ib_res.scalar_one_or_none()
 
     if not ib_record:
+        # 1. Если порта нет в БД -> переводим в BASE
         new_record = TariffInbound(
-            server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=ib_id,
+            server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=str(ib_id),
             protocol_name=target_ib.get("protocol", "unknown"), port=target_ib.get("port", 0),
             remark=target_ib.get("remark", "")
         )
         db_session.add(new_record)
         await callback.answer("🟢 Переведено в тариф BASE")
     elif ib_record.plan_type == SubscriptionType.BASE:
+        # 2. Если порт в BASE -> переводим в PREMIUM
         ib_record.plan_type = SubscriptionType.PREMIUM
         await callback.answer("💎 Переведено в тариф PREMIUM")
     else:
+        # 3. Если порт в PREMIUM -> удаляем привязку (НЕАКТИВЕН)
         await db_session.delete(ib_record)
         await callback.answer("⚫ Порт полностью деактивирован")
 
     await db_session.commit()
+    
+    # Обновляем экран, передавая аргументы в правильном позиционном порядке
     await cb_adm_srv_manage(callback, db_session)
+
 
 # handlers/admin.py — ШАГ 4.3
 
