@@ -255,10 +255,11 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         msg_status = f"✅ Успешное прямое продление тарифа {plan_type.upper()}."
 
 
+# handlers/admin.py — УМНЫЙ СДВИГ ДАТ ЧЕРЕЗ BULK ADJUST БЕЗ УДАЛЕНИЯ КЛИЕНТОВ
+
     await db_session.flush()
     nodes_synced = 0
     
-    # Определяем, какая подписка главная и горит прямо сейчас
     active_subscription_object = prem_sub if (prem_sub and not prem_sub.is_pending and prem_sub.expires_at > now) else base_sub
     now_active_plan = active_subscription_object.plan_type if active_subscription_object else None
 
@@ -273,12 +274,10 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         keys_res = await db_session.execute(keys_stmt)
         existing_keys = {k.server_id: k for k in keys_res.scalars().all()}
         
-        # Вычисляем дедлайн для панели 3x-ui (60 дней премиума)
+        # Целевая дата, которую мы ДОЛЖНЫ выставить на панелях (60 дней премиума)
         active_end_date = active_subscription_object.expires_at
-        expiry_timestamp = int(active_end_date.timestamp() * 1000)
 
         for srv in servers:
-            # Четко собираем инбаунды под текущий активный тариф сети
             if now_active_plan == SubscriptionType.PREMIUM:
                 ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_([SubscriptionType.BASE, SubscriptionType.PREMIUM]))
             else:
@@ -294,39 +293,50 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                 # Нарезка с нуля на новой ноде (Reserve-1)
                 success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days)
                 if success:
-                    protocol = "https" if srv.api_url.startswith("https") else "http"
+                    protocol = "http" if srv.api_url.startswith("http") and "myepicpanel" not in srv.api_url else "https"
                     parsed_url = urlparse(srv.api_url)
                     clean_domain = parsed_url.hostname
                     subscribe_url = f"{protocol}://{clean_domain}:{srv.sub_port}/{srv.sub_path}/{sub_id}"
                     
-                    # Пишем ключ строго к ID подписки PREMIUM
-                    key_record = VPNKey(subscription_id=prem_sub.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=subscribe_url)
+                    key_record = VPNKey(subscription_id=active_subscription_object.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=subscribe_url)
                     db_session.add(key_record)
                     nodes_synced += 1
-
             else:
-                # ОСТАВЛЯЕМ КЛЮЧ В БД БОТА КАК ЕСТЬ (БЕЗ ПЕРЕПРИВЯЗОК ID)
+                # ВЕТКА КЛЮЧ УЖЕ ЕСТЬ (СЕРВЕР Base-1/Main-1) — БЕЗОПАСНЫЙ СДВИГ ВРЕМЕНИ
                 current_key = existing_keys[srv.id]
                 
-                path_delete = f"panel/api/clients/del/{current_key.client_email}"
-                await xui._request("POST", path_delete)
+                # 1. Сначала перенарезаем инбаунды под новый PREMIUM-пул портов
+                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=days)
                 
-                success = await xui.add_client(
-                    email=current_key.client_email, 
-                    sub_id=current_key.sub_id, 
-                    inbound_ids=inbound_ids, 
-                    expires_days=days
-                )
+                # 2. Запрашиваем из панели текущую карточку клиента, чтобы узнать, сколько дней там сейчас реально выставлено
+                path_get = f"panel/api/clients/get/{current_key.client_email}"
+                res_get = await xui._request("GET", path_get)
                 
-                if success:
-                    nodes_synced += 1
+                if res_get and res_get.get("success") and res_get.get("obj"):
+                    client_panel_data = res_get.get("obj")
+                    current_expiry_ts = client_panel_data.get("expiryTime", 0) / 1000
+                    
+                    # Переводим таймштамп панели в читаемую дату Python
+                    current_expiry_date = datetime.datetime.fromtimestamp(current_expiry_ts)
+                    
+                    # Считаем разницу между целевой датой премиума (60 дней) и тем, что сейчас есть на панели (30 дней)
+                    # Если разница положительная — сдвигаем вперед, если отрицательная — назад
+                    days_delta = (active_end_date - current_expiry_date).days
+                    
+                    # 3. Вызываем официальный bulkAdjust для жесткого пробития кэша инбаундов!
+                    if days_delta != 0:
+                        await xui.adjust_client_days(emails=[current_key.client_email], add_days=days_delta)
                 else:
-                    logger.error(f"Не удалось перенарезать тариф для {current_key.client_email} на сервере {srv.name}")
-
+                    # Запасной вариант, если панель не отдала карточку — шлем прямой апдейт времени
+                    expiry_timestamp = int(active_end_date.timestamp() * 1000)
+                    await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
+                
+                nodes_synced += 1
 
     await db_session.commit()
     await message.answer(text=f"⚡ <b>CRM Синхронизация завершена!</b>\n\n• Начислено: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n• Статус: <i>{msg_status}</i>\n• Синхронизировано нод: <b>{nodes_synced} шт.</b>")
     await render_user_card(message, db_session, target_id)
+
 
 
 @admin_router.callback_query(F.data.startswith("adm_crm_wipe_subs_"))
