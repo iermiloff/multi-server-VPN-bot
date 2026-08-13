@@ -33,6 +33,7 @@ class AdminServerStates(StatesGroup):
     wait_for_url = State()
     wait_for_token = State()
     wait_for_sub_port = State()
+    wait_for_sub_path = State()
 
 class AdminPartnerStates(StatesGroup):
     wait_for_id = State()
