@@ -138,3 +138,13 @@ class XUIMultiClient:
         res = await self._request("POST", path, json_data=payload)
         return res is not None and res.get("success", False)
 
+    async def adjust_client_days(self, emails: List[str], add_days: int) -> bool:
+        """Сдвигает срок действия подписки (в днях) для списка email без удаления из инбаундов"""
+        payload = {
+            "emails": emails,    # Список email пользователей (передаем массивом)
+            "addDays": add_days,  # Количество дней сдвига (может быть положительным или отрицательным)
+            "addBytes": 0
+        }
+        path = "panel/api/clients/bulkAdjust"
+        res = await self._request("POST", path, json_data=payload)
+        return res is not None and res.get("success", False)
