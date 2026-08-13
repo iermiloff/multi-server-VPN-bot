@@ -15,12 +15,16 @@ class XUIMultiClient:
             "Content-Type": "application/json"
         }
         
+
     async def _request(self, method: str, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         url = f"{self.base_url}/{path.lstrip('/')}"
         try:
-            async with aiohttp.ClientSession() as session:
+            # ИСПРАВЛЕНО: Создаем коннектор, который игнорирует самоподписанные SSL-сертификаты ноды
+            connector = aiohttp.TCPConnector(ssl=False)
+            
+            # Передаем коннектор в сессию
+            async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.request(method, url, headers=self.headers, json=json_data, timeout=10) as response:
-                    # ИСПРАВЛЕНО: проверяем успешные HTTP-статусы (200, 201)
                     if response.status in (200, 201):
                         return await response.json()
                     logger.error(f"Ошибка API 3x-ui ({url}): Статус {response.status}")
@@ -28,6 +32,7 @@ class XUIMultiClient:
         except Exception as e:
             logger.error(f"Сетевое исключение при запросе к ноде {url}: {e}")
             return None
+
 
     async def get_inbounds(self) -> List[Dict[str, Any]]:
         """Получение списка инбаундов ноды (Страница 2 API)"""
