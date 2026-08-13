@@ -425,3 +425,94 @@ async def cb_adm_ref_payouts_list(callback: CallbackQuery, db_session: AsyncSess
             total += p.partner_balance_usd
         text += f"📊 <b>Итого к выплате по сети:</b> <code>${total:.2f}</code>"
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Меню", callback_data="adm_main_menu")]]))
+
+@admin_router.callback_query(F.data.startswith("adm_toggle_ib_"))
+async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
+    """Переключение тарифов инбаундов ноды (BASE <=> PREMIUM <=> ОТКЛЮЧЕН)"""
+    raw_data = callback.data.replace("adm_toggle_ib_", "")
+    parts = raw_data.split("_", 1)
+    server_id = int(parts[0])
+    ib_id = int(parts[1].strip())
+    
+    srv = (await db_session.execute(select(Server).where(Server.id == server_id))).scalar_one_or_none()
+    xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
+    all_inbounds = await xui.get_inbounds()
+    target_ib = next((i for i in all_inbounds if i.get("id") == ib_id), None)
+    
+    ib_record = (await db_session.execute(select(TariffInbound).where(TariffInbound.server_id == server_id, TariffInbound.inbound_id == ib_id))).scalar_one_or_none()
+    
+    if not ib_record:
+        db_session.add(TariffInbound(server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=ib_id, protocol_name=target_ib.get("protocol", "unknown"), port=target_ib.get("port", 0), remark=target_ib.get("remark", "")))
+        await callback.answer("Переведено в тариф BASE")
+    elif ib_record.plan_type == SubscriptionType.BASE:
+        ib_record.plan_type = SubscriptionType.PREMIUM
+        await callback.answer("Переведено в тариф PREMIUM")
+    else:
+        await db_session.delete(ib_record)
+        await callback.answer("⚫ Инбаунд деактивирован")
+        
+    await db_session.commit()
+    await cb_adm_srv_manage(callback, db_session)
+
+@admin_router.callback_query(F.data == "adm_partners_list")
+async def cb_adm_partners_list(callback: CallbackQuery, db_session: AsyncSession):
+    """Вывод списка каналов и спонсоров"""
+    if callback: await callback.answer()
+    channels = (await db_session.execute(select(PartnerChannel))).scalars().all()
+    text = "📢 <b>Управление каналами и подписками:</b>\n\n"
+    kb = []
+    if not channels: 
+        text += "<i>Список каналов пока пуст.</i>"
+    else:
+        for ch in channels:
+            role = " Саппорт" if ch.is_required else " Спонсор"
+            text += f"• <b>{ch.channel_name}</b> [{role}]\nID: <code>{ch.channel_id}</code>\n\n"
+            kb.append([InlineKeyboardButton(text=f"❌ Удалить {ch.channel_name}", callback_data=f"adm_part_del_{ch.id}")])
+            
+    kb.append([InlineKeyboardButton(text="➕ Добавить канал", callback_data="adm_part_add_start"), InlineKeyboardButton(text=" Меню", callback_data="adm_main_menu")])
+    if callback: await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    return text, InlineKeyboardMarkup(inline_keyboard=kb)
+
+@admin_router.callback_query(F.data == "adm_part_add_start")
+async def cb_adm_part_add_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer(); await state.set_state(AdminPartnerStates.wait_for_id)
+    await callback.message.edit_text("<b>Шаг 1/4:</b> Введите цифровой <b>Telegram ID канала</b>:")
+
+@admin_router.message(AdminPartnerStates.wait_for_id)
+async def msg_part_id(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"): await state.clear(); await cmd_admin(message, db_session); return
+    try: ch_id = int(message.text.strip())
+    except ValueError: await message.answer("❌ ID должен быть числом!:"); return
+    await state.update_data(channel_id=ch_id); await state.set_state(AdminPartnerStates.wait_for_name)
+    await message.answer("<b>Шаг 2/4:</b> Введите название канала:")
+
+@admin_router.message(AdminPartnerStates.wait_for_name)
+async def msg_part_name(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"): await state.clear(); await cmd_admin(message, db_session); return
+    await state.update_data(channel_name=message.text.strip()); await state.set_state(AdminPartnerStates.wait_for_link)
+    await message.answer("<b>Шаг 3/4:</b> Введите ссылку-приглашение:")
+
+@admin_router.message(AdminPartnerStates.wait_for_link)
+async def msg_part_link(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"): await state.clear(); await cmd_admin(message, db_session); return
+    await state.update_data(invite_link=message.text.strip()); await state.set_state(AdminPartnerStates.wait_for_type)
+    kb = [[InlineKeyboardButton(text=" Спонсор", callback_data="role_sponsor"), InlineKeyboardButton(text=" Саппорт", callback_data="role_support")]]
+    await message.answer("<b>Шаг 4/4:</b> Выберите назначение канала:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@admin_router.callback_query(AdminPartnerStates.wait_for_type, F.data.startswith("role_"))
+async def cb_part_finalize(callback: CallbackQuery, state: FSMContext, db_session: AsyncSession):
+    await callback.answer(); is_required = (callback.data == "role_support")
+    data = await state.get_data(); await state.clear()
+    db_session.add(PartnerChannel(channel_id=data["channel_id"], channel_name=data["channel_name"], invite_link=data["invite_link"], is_required=is_required))
+    await db_session.commit()
+    await cb_adm_partners_list(callback, db_session)
+
+@admin_router.callback_query(F.data.startswith("adm_part_del_"))
+async def cb_part_del(callback: CallbackQuery, db_session: AsyncSession):
+    ch_id = int(callback.data.split("_")[-1])
+    channel = (await db_session.execute(select(PartnerChannel).where(PartnerChannel.id == ch_id))).scalar_one_or_none()
+    if channel:
+        await db_session.delete(channel); await db_session.commit()
+        await callback.answer("Канал успешно удален!")
+    await cb_adm_partners_list(callback, db_session)
+
