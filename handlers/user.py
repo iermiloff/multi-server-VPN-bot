@@ -385,7 +385,9 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
             protocol = "https" if srv.api_url.startswith("https") else "http"
             raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
             clean_host = raw_host.split(":")[0]
-            subscribe_url = f"{protocol}://{clean_host}:{srv.sub_port}/sub/{sub_id}"
+            
+            # СТАЛО (ИСПРАВЛЕНО): Подставляем динамический srv.sub_path из базы данных вместо /sub/
+            subscribe_url = f"{protocol}://{clean_host}:{srv.sub_port}/{srv.sub_path}/{sub_id}"
             
             key_record = VPNKey(
                 subscription_id=sub.id, server_id=srv.id, 
@@ -393,6 +395,7 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
             )
             db_session.add(key_record)
             success_nodes_count += 1
+
 
     if success_nodes_count > 0:
         await db_session.commit()
