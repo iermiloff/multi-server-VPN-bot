@@ -37,25 +37,27 @@ class XUIMultiClient:
 
 # services/xui.py — ИСПРАВЛЕННЫЙ МЕТОД СОГЛАСНО СПЕЦИФИКАЦИИ ПАНЕЛИ
 
+# services/xui.py — ВНУТРИ КЛАССА XUIMultiClient
+
     async def add_client(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int) -> bool:
         """Добавление мульти-клиента во все инбаунды по официальной спецификации"""
         expiry_time = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp() * 1000)
         
-        # Отправляем ТОЛЬКО универсальные поля, как требует документация на странице 9.
-        # Поле "id" убрано — панель сама сгенерирует UUID на сервере!
+        # ИСПРАВЛЕНО: Обернули параметры в объект "client" согласно JSON-схеме панели
         payload = {
-            "email": email,
-            "limitIp": 0,
-            "totalGB": 0,
-            "expiryTime": expiry_time,
-            "enable": True,
-            "subId": sub_id,         # Идентификатор подписки (хвост ссылки)
-            "inboundIds": inbound_ids  # Список портов тарифа
+            "client": {
+                "id": sub_id,        # Уникальный UUID ключа
+                "email": email,      # Email пользователя
+                "limitIp": 0,
+                "totalGB": 0,
+                "expiryTime": expiry_time,
+                "enable": True,
+                "subId": sub_id      # Хвост ссылки подписки
+            },
+            "inboundIds": inbound_ids  # Список портов тарифа на верхнем уровне
         }
         
         path = "panel/api/clients/add"
-        
-        # Делаем чистый запрос к API
         url = f"{self.base_url}/{path.lstrip('/')}"
         try:
             connector = aiohttp.TCPConnector(ssl=False)
@@ -67,16 +69,13 @@ class XUIMultiClient:
                         logger.info(f"✅ Клиент {email} успешно создан в глобальной базе панели пачкой на порты {inbound_ids}")
                         return True
                         
-                    # Если панель вернула success=False — пишем в лог РЕАЛЬНУЮ причину отказа панели!
                     logger.error(f"❌ Панель отклонила создание клиента {email}. Ответ панели: {res}")
                     
-                    # Пытаемся вызвать обновление на случай, если это реально дубликат email
-                    payload["id"] = email # Для обновления используем email как ключ
-                    return await self.update_client_expiry_by_payload(email, payload)
+                    # Запасной путь обновления, если клиент уже существовал
+                    return await self.update_client_expiry_by_payload(email, payload["client"])
         except Exception as e:
             logger.error(f"Сетевой сбой при добавлении мульти-клиента: {e}")
             return False
-
 
 # services/xui.py — ШАГ 2 ИЗ 2
 
