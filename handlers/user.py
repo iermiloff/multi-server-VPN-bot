@@ -183,17 +183,31 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                 profile_text += "<i>⌛ Нарезаем доступ на серверах, обновите профиль через минуту...</i>\n"
             else:
                 for key in all_user_keys:
+
                     if key.server:
                         srv = key.server
-                        protocol = "https" if srv.api_url.startswith("https") else "http"
                         
+                        # Извлекаем чистый хост (домен или IP)
                         from urllib.parse import urlparse
                         parsed_url = urlparse(srv.api_url)
-                        clean_domain = parsed_url.hostname  # Строго "myepicpanel.ru" или IP
+                        clean_domain = parsed_url.hostname
                         
+                        # Проверка регулярным выражением: является ли хост IP-адресом
+                        import re
+                        is_ip = clean_domain and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", clean_domain)
+                        
+                        # ИСПРАВЛЕНО: Если хост — чистый IP-адрес, принудительно ставим http://
+                        if is_ip:
+                            protocol = "http"
+                        else:
+                            # Для буквенных доменов берем протокол из api_url панели
+                            protocol = "https" if srv.api_url.startswith("https") else "http"
+                        
+                        # Собираем чистую рабочую ссылку под клиентские приложения
                         dynamic_url = f"{protocol}://{clean_domain}:{srv.sub_port}/{srv.sub_path}/{key.sub_id}"
                     else:
                         dynamic_url = "Ошибка: Сервер удален"
+
                         
                     server_name = key.server.name if key.server else "Сервер"
                     profile_text += f"├ 🌍 <b>{server_name}:</b> <code>{dynamic_url}</code>\n"
