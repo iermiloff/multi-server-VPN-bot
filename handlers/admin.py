@@ -2,6 +2,7 @@
 import logging
 import datetime
 import uuid
+from urllib.parse import urlparse
 from typing import List, Any, Union
 from aiogram import Router, Bot, F
 from aiogram.filters import Command
