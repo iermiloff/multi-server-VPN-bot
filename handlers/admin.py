@@ -172,15 +172,14 @@ async def cb_adm_crm_select_plan(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await callback.message.edit_text(text=f"⏳ Введите количество дней подписки (числом) для тарифа <b>{plan_type.upper()}</b> пользователю <code>{data['target_id']}</code>:")
 
+# handlers/admin.py — ОКОНЧАТЕЛЬНАЯ СИНХРОНИЗАЦИЯ СЕРВЕРОВ ПРИ АПГРЕЙДЕ С ОЧЕРЕДЬЮ ТАРИФОВ
+
 @admin_router.message(AdminCrmStates.wait_for_days_count)
 async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session: AsyncSession):
     if message.text.startswith("/"):
-        await state.clear()
-        await cmd_admin(message, db_session)
-        return
+        await state.clear(); await cmd_admin(message, db_session); return
 
-    try:
-        days = int(message.text.strip())
+    try: days = int(message.text.strip())
     except ValueError:
         await message.answer("❌ Количество дней должно быть целым числом! Попробуйте еще раз:")
         return
@@ -189,7 +188,7 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
     await state.clear()
     
     target_id = data["target_id"]
-    plan_type = data["plan_type"]
+    plan_type = data["plan_type"] # Тариф, который мы НАЧИСЛЯЕМ (base или premium)
     now = datetime.datetime.utcnow()
     
     stmt_base = select(Subscription).where(Subscription.user_id == target_id, Subscription.plan_type == SubscriptionType.BASE).order_by(Subscription.expires_at.desc()).limit(1)
@@ -205,20 +204,26 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
     prem_active = prem_sub and prem_sub.is_active and prem_sub.expires_at > now and not prem_sub.is_pending
 
     msg_status = ""
+    active_subscription_object = None
 
-    # СЦЕНАРИЙ 1: Апгрейд (Начисляем PREMIUM, а у юзера горит BASE) -> Замораживаем БАЗУ
+    # СЦЕНАРИЙ 1: Апгрейд (Начисляем PREMIUM, а у юзера горит активный BASE) -> Замораживаем БАЗУ
     if plan_type == "premium" and base_active:
+        # 1. Замораживаем базовые 30 дней и убираем их таймер в очередь
         base_sub.is_pending = True
+        
+        # 2. Активируем Премиум прямо сейчас на новые 60 дней
         if prem_sub:
             prem_sub.expires_at = now + datetime.timedelta(days=days)
             prem_sub.is_pending = False
             prem_sub.is_active = True
+            active_subscription_object = prem_sub
         else:
             prem_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.PREMIUM, expires_at=now + datetime.timedelta(days=days), is_pending=False)
             db_session.add(prem_sub)
-        msg_status = "🔥 PREMIUM активирован! Текущий базовый тариф заморожен и убран в очередь."
+            active_subscription_object = prem_sub
+        msg_status = "🔥 PREMIUM активирован на 60 дней! Базовый тариф на 30 дней успешно заморожен и убран в очередь."
 
-    # СЦЕНАРИЙ 2: Даунгрейд (Начисляем BASE, а у юзера горит PREMIUM) -> Отправляем БАЗУ в очередь
+    # СЦЕНАРИЙ 2: Даунгрейд (Начисляем BASE, а у юзера горит активный PREMIUM) -> Отправляем БАЗУ в очередь
     elif plan_type == "base" and prem_active:
         if base_sub:
             if base_sub.is_pending: base_sub.expires_at += datetime.timedelta(days=days)
@@ -228,6 +233,7 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         else:
             base_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.BASE, expires_at=now + datetime.timedelta(days=days), is_pending=True)
             db_session.add(base_sub)
+        active_subscription_object = prem_sub # Главным остается текущий премиум
         msg_status = "💤 PREMIUM активен. Новый базовый тариф добавлен в очередь отложенного старта."
 
     # СЦЕНАРИЙ 3: Стандартное начисление / Продление
@@ -235,19 +241,21 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         target_sub = prem_sub if plan_type == "premium" else base_sub
         if target_sub and target_sub.expires_at > now and not target_sub.is_pending:
             target_sub.expires_at += datetime.timedelta(days=days)
+            active_subscription_object = target_sub
         else:
             if plan_type == "premium":
                 prem_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.PREMIUM, expires_at=now + datetime.timedelta(days=days), is_pending=False)
                 db_session.add(prem_sub)
+                active_subscription_object = prem_sub
             else:
                 base_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.BASE, expires_at=now + datetime.timedelta(days=days), is_pending=False)
                 db_session.add(base_sub)
+                active_subscription_object = base_sub
         msg_status = f"✅ Успешное прямое продление тарифа {plan_type.upper()}."
 
     await db_session.flush()
     nodes_synced = 0
-
-    now_active_plan = SubscriptionType.PREMIUM if (prem_sub and prem_sub.is_active and not prem_sub.is_pending and prem_sub.expires_at > now) else SubscriptionType.BASE if (base_sub and base_sub.is_active and not base_sub.is_pending and base_sub.expires_at > now) else None
+    now_active_plan = active_subscription_object.plan_type if active_subscription_object else None
 
     if now_active_plan:
         servers_res = await db_session.execute(select(Server).where(Server.is_active == True))
@@ -259,7 +267,10 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         keys_stmt = select(VPNKey).join(Subscription).where(Subscription.user_id == target_id)
         keys_res = await db_session.execute(keys_stmt)
         existing_keys = {k.server_id: k for k in keys_res.scalars().all()}
-        active_end_date = prem_sub.expires_at if now_active_plan == SubscriptionType.PREMIUM else base_sub.expires_at
+        
+        # На ВСЕХ серверах (и BASE, и PREMIUM) выставляем время окончания текущей главной подписки (60 дней Премиума)!
+        active_end_date = active_subscription_object.expires_at
+        expiry_timestamp = int(active_end_date.timestamp() * 1000)
 
         for srv in servers:
             if now_active_plan == SubscriptionType.PREMIUM:
@@ -274,25 +285,32 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
             xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
             
             if srv.id not in existing_keys:
+                # Нарезка аккаунта с нуля на новых нодах
                 success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days)
                 if success:
                     protocol = "https" if srv.api_url.startswith("https") else "http"
                     raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
                     clean_host = raw_host.split(":")
                     subscribe_url = f"{protocol}://{clean_host}:{srv.sub_port}/{srv.sub_path}/{sub_id}"
-                    key_record = VPNKey(subscription_id=base_sub.id if base_sub else prem_sub.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=subscribe_url)
+                    key_record = VPNKey(subscription_id=active_subscription_object.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=subscribe_url)
                     db_session.add(key_record)
                     nodes_synced += 1
             else:
+                # ПЕРЕНАРЕЗКА И ПРОДЛЕНИЕ: Если ключ уже был (на BASE сервере), мы перепривязываем его 
+                # к ID новой активной подписки Премиума в СУБД бота, отправляем пачку inboundIds 
+                # премиума по мульти-API и выставляем на панели 3x-ui время 60 дней!
                 current_key = existing_keys[srv.id]
-                expiry_timestamp = int(active_end_date.timestamp() * 1000)
+                current_key.subscription_id = active_subscription_object.id
+                
+                # Мульти-API обновит порты и выставит 60 дней на панели
                 await xui.add_client(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=1)
                 await xui.update_client_expiry(email=current_key.client_email, expiry_time=expiry_timestamp)
                 nodes_synced += 1
 
     await db_session.commit()
-    await message.answer(text=f"⚡ <b>CRM Синхронизация завершена!</b>\n\n• Начислено: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n• Статус: <i>{msg_status}</i>\n• Нод связано: <b>{nodes_synced} шт.</b>")
+    await message.answer(text=f"⚡ <b>CRM Синхронизация завершена!</b>\n\n• Начислено: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n• Статус: <i>{msg_status}</i>\n• Синхронизировано нод: <b>{nodes_synced} шт.</b>")
     await render_user_card(message, db_session, target_id)
+
 
 @admin_router.callback_query(F.data.startswith("adm_crm_wipe_subs_"))
 async def cb_adm_crm_wipe_subs(callback: CallbackQuery, db_session: AsyncSession):
