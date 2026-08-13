@@ -100,3 +100,15 @@ class TariffInbound(Base):
     remark: Mapped[str] = mapped_column(String(255))
     
     server: Mapped["Server"] = relationship(back_populates="inbounds")
+
+
+class PaymentLog(Base):
+    __tablename__ = "payment_logs"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invoice_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
+    plan_type: Mapped[str] = mapped_column(String(50))
+    amount: Mapped[float] = mapped_column(BigInteger)
+    paid_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
+
