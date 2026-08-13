@@ -315,9 +315,34 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                 
                 await xui.attach_client_inbounds(email=current_key.client_email, inbound_ids=inbound_ids)
                 
-                await xui.update_client_expiry(email=current_key.client_email, expiry_time=expiry_timestamp)
+                # 2. Запрашиваем из панели текущую карточку клиента, чтобы забрать его РЕАЛЬНЫЙ UUID
+                path_get = f"panel/api/clients/get/{current_key.client_email}"
+                res_get = await xui._request("GET", path_get)
+                
+                if res_get and res_get.get("success") and res_get.get("obj"):
+                    client_panel_data = res_get.get("obj")
+                    
+                    # Вытаскиваем оригинальный UUID и subId, которые СЕЙЧАС лежат в панели
+                    real_panel_id = client_panel_data.get("id")
+                    real_panel_sub_id = client_panel_data.get("subId")
+                    
+                    payload = {
+                        "id": real_panel_id,
+                        "email": current_key.client_email,
+                        "totalGB": 0,
+                        "expiryTime": expiry_timestamp,  # Выставляем новые 60 дней!
+                        "subId": real_panel_sub_id,
+                        "enable": True
+                    }
+                    
+                    path_update = f"panel/api/clients/update/{current_key.client_email}"
+                    await xui._request("POST", path_update, json_data=payload)
+                else:
+                    # Запасной вариант прямой перезаписи
+                    await xui.update_client_expiry(email=current_key.client_email, expiry_time=expiry_timestamp)
                 
                 nodes_synced += 1
+
 
 
     await db_session.commit()
