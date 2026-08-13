@@ -95,14 +95,19 @@ async def check_partner_subscriptions_job(bot: Bot):
         await session.commit()
 
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
-    """Инициализация планировщика задач"""
+    """Инициализация и запуск единого центра фоновых задач бота"""
     scheduler = AsyncIOScheduler()
+
+    # 1. СТАРАЯ ЗАДАЧА: Проверка протухших дней (каждый час)
     scheduler.add_job(
         check_partner_subscriptions_job,
-        "interval",
-        hours=2,
-        args=[bot]
+        trigger="interval",
+        hours=1,
+        args=[bot],
+        id="check_subs"
     )
+
+    # 2. НОВАЯ ЗАЗАЧА: Обнуление трафика 150/300 ГБ (1-го числа каждого месяца в 00:00)
     scheduler.add_job(
         monthly_traffic_reset_job,
         trigger="cron",
@@ -111,7 +116,8 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         minute=0,
         id="monthly_traffic_reset"
     )
-        
+
+    logger.info("🚀 [APScheduler] Обе фоновые задачи биллинга (дни + трафик) успешно зарегистрированы!")
     return scheduler
 
 # services/scheduler.py — ЕЖЕМЕСЯЧНОЕ ОБНУЛЕНИЕ ТРАФИКА И ВЫСТАВЛЕНИЕ ЛИМИТОВ 1-ГО ЧИСЛА
