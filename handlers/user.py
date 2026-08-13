@@ -394,16 +394,14 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
         success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=30)
         
         if success:
-            protocol = "https" if srv.api_url.startswith("https") else "http"
-            raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
-            clean_host = raw_host.split(":")[0]
-            
-            # СТАЛО (ИСПРАВЛЕНО): Подставляем динамический srv.sub_path из базы данных вместо /sub/
-            subscribe_url = f"{protocol}://{clean_host}:{srv.sub_port}/{srv.sub_path}/{sub_id}"
-            
+            # Нам больше не нужно собирать здесь subscribe_url!
+            # Пишем в config_data заглушку, так как Личный кабинет теперь собирает всё сам
             key_record = VPNKey(
-                subscription_id=sub.id, server_id=srv.id, 
-                client_email=email, sub_id=sub_id, config_data=subscribe_url
+                subscription_id=sub.id, 
+                server_id=srv.id, 
+                client_email=email, 
+                sub_id=sub_id, 
+                config_data=sub_id # Просто дублируем sub_id
             )
             db_session.add(key_record)
             success_nodes_count += 1
