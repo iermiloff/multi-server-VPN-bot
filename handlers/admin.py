@@ -281,8 +281,6 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         # Целевая дата, которую мы ДОЛЖНЫ выставить на панелях (60 дней премиума)
         active_end_date = active_subscription_object.expires_at
 
-# handlers/admin.py — ИСПРАВЛЕННЫЙ ЦИКЛ БЕЗ ДУБЛИКАТОВ ELSE
-
         for srv in servers:
             if now_active_plan == SubscriptionType.PREMIUM:
                 ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_([SubscriptionType.BASE, SubscriptionType.PREMIUM]))
@@ -296,8 +294,8 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
             xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
             
             if srv.id not in existing_keys:
-                # Нарезка с нуля на новой ноде (Reserve-1)
-                success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days)
+                # 1. СОЗДАНИЕ С НУЛЯ: передаем текущий plan_type для нарезки 150 или 300 ГБ
+                success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days, plan_type=plan_type)
                 if success:
                     protocol = "http" if srv.api_url.startswith("http") and "myepicpanel" not in srv.api_url else "https"
                     parsed_url = urlparse(srv.api_url)
@@ -307,42 +305,48 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                     key_record = VPNKey(subscription_id=active_subscription_object.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=subscribe_url)
                     db_session.add(key_record)
                     nodes_synced += 1
-
             else:
-                # ОСТАВЛЯЕМ КЛЮЧ В БД БОТА КАК ЕСТЬ
+                # 2. ОБНОВЛЕНИЕ/ПРОДЛЕНИЕ СУЩЕСТВУЮЩЕГО КЛЮЧА
                 current_key = existing_keys[srv.id]
                 expiry_timestamp = int(active_end_date.timestamp() * 1000)
                 
+                # Рассчитываем новый лимит трафика в байтах под текущий активный план
+                target_gb = 300 if plan_type.lower() == "premium" else 150
+                target_bytes = target_gb * 1024 * 1024 * 1024
+                
+                # Принудительно привязываем клиента к инбаундам
                 await xui.attach_client_inbounds(email=current_key.client_email, inbound_ids=inbound_ids)
                 
-                # 2. Запрашиваем из панели текущую карточку клиента, чтобы забрать его РЕАЛЬНЫЙ UUID
+                # Подтягиваем оригинальные ID панели
                 path_get = f"panel/api/clients/get/{current_key.client_email}"
                 res_get = await xui._request("GET", path_get)
                 
                 if res_get and res_get.get("success") and res_get.get("obj"):
                     client_panel_data = res_get.get("obj")
-                    
-                    # Вытаскиваем оригинальный UUID и subId, которые СЕЙЧАС лежат в панели
                     real_panel_id = client_panel_data.get("id")
                     real_panel_sub_id = client_panel_data.get("subId")
                     
                     payload = {
                         "id": real_panel_id,
                         "email": current_key.client_email,
-                        "totalGB": 0,
-                        "expiryTime": expiry_timestamp,  # Выставляем новые 60 дней!
+                        "totalGB": target_bytes,        # Накатываем новый лимит (150 или 300 ГБ)
+                        "expiryTime": expiry_timestamp,  # Накатываем новые дни
                         "subId": real_panel_sub_id,
+                        "limitIp": 3,                    # Прописываем лимит IP устройств
                         "enable": True
                     }
                     
                     path_update = f"panel/api/clients/update/{current_key.client_email}"
                     await xui._request("POST", path_update, json_data=payload)
+                    
+                    # ИСПРАВЛЕНО: Согласно странице 12 документации, принудительно СБРАСЫВАЕМ счетчик 
+                    # использованного трафика (upload/download) в ноль, так как у пользователя начался новый период!
+                    path_reset_traffic = f"panel/api/clients/resetTraffic/{current_key.client_email}"
+                    await xui._request("POST", path_reset_traffic)
                 else:
-                    # Запасной вариант прямой перезаписи
-                    await xui.update_client_expiry(email=current_key.client_email, expiry_time=expiry_timestamp)
+                    await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
                 
                 nodes_synced += 1
-
 
 
     await db_session.commit()
