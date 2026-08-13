@@ -305,11 +305,9 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                     nodes_synced += 1
             else:
                 # ОСТАВЛЯЕМ КЛЮЧ В БД КАК ЕСТЬ (БЕЗ ПЕРЕПРИВЯЗОК ID)
-                current_key = existing_keys[srv.id]
-                
-                # ИСПРАВЛЕНО: Заменили srv_client на xui, чтобы убрать NameError!
-                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=days)
-                await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
+                current_key = existing_keys[srv.id]       
+                expiry_timestamp = int(active_end_date.timestamp() * 1000)
+                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expiry_time=expiry_timestamp)
                 nodes_synced += 1
 
     await db_session.commit()
