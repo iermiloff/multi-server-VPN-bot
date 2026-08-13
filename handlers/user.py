@@ -57,41 +57,65 @@ def get_profile_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# handlers/user.py — ШАГ 2 ИЗ 4
-
 @user_router.message(CommandStart())
-async def cmd_start(message: Message, db_session: AsyncSession, bot: Bot):
-    """Регистрация нового пользователя и жесткое разделение потоков"""
-    # РАЗДЕЛЕНИЕ ПОТОКОВ: Если пишет админ — сразу перенаправляем его в админку
-    if message.from_user.id in config.ADMIN_IDS:
+async def cmd_start(message: Message, db_session: AsyncSession, bot: Bot, command: any = None):
+    """Регистрация нового пользователя с поддержкой реферальных хвостов Deep Linking"""
+    user_id = message.from_user.id
+    
+    # 1. РАЗДЕЛЕНИЕ ПОТОКОВ: Если пишет админ — сразу перенаправляем его в админку
+    if user_id in config.ADMIN_IDS:
         from handlers.admin import cmd_admin
         await cmd_admin(message, db_session)
         return
+        
+    # 2. ПАРСИНГ АРГУМЕНТОВ ССЫЛКИ: Проверяем, пришел ли юзер по реф-ссылке
+    referrer_id = None
+    # В aiogram 3.x аргументы команды из фильтра CommandStart() извлекаются через message.text
+    if message.text and len(message.text.split()) > 1:
+        args = message.text.split()[1] # Получим строку типа "ref6912785652"
+        if args.startswith("ref"):
+            try:
+                potential_ref = int(args.replace("ref", "").strip())
+                # Защита от самореферальства (нельзя пригласить самого себя)
+                if potential_ref != user_id:
+                    referrer_id = potential_ref
+            except ValueError:
+                pass
 
-    stmt = select(User).where(User.telegram_id == message.from_user.id)
+    # 3. РЕГИСТРАЦИЯ: Проверяем наличие пользователя в СУБД Overlord
+    stmt = select(User).where(User.telegram_id == user_id)
     res = await db_session.execute(stmt)
     user = res.scalar_one_or_none()
     
     if not user:
-        user = User(telegram_id=message.from_user.id, username=message.from_user.username)
+        # Создаем абсолютно нового пользователя и намертво вшиваем referred_by в базу!
+        user = User(
+            telegram_id=user_id, 
+            username=message.from_user.username,
+            referred_by=referrer_id, # Связь зафиксирована
+            registered_at=datetime.datetime.utcnow()
+        )
         db_session.add(user)
         await db_session.commit()
-
-    if not await check_main_channel_sub(bot, db_session, message.from_user.id):
+        logger.info(f"👤 Зарегистрирован новый реферал {user_id}. Пригласитель: {referrer_id}")
+        
+    # 4. ПРОВЕРКА ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ НА КАНАЛ ПОДДЕРЖКИ
+    if not await check_main_channel_sub(bot, db_session, user_id):
         stmt = select(PartnerChannel).where(PartnerChannel.is_required == True)
         ch_res = await db_session.execute(stmt)
         channel = ch_res.scalar_one()
         
         kb = [
-            [InlineKeyboardButton(text="📢 Подписаться", url=channel.invite_link)],
-            [InlineKeyboardButton(text="🔄 Проверить подписку", callback_data="check_sub_again")]
+            [InlineKeyboardButton(text=" Подписаться", url=channel.invite_link)],
+            [InlineKeyboardButton(text=" Проверить подписку", callback_data="check_sub_again")]
         ]
         await message.answer(
-            text=f"❌ <b>Доступ ограничен!</b>\n\nДля использования <b>{config.BRAND_NAME}</b> необходимо подписаться на наш официальный канал:",
+            text=f"❌<b>Доступ ограничен!</b>\n\nДля использования <b>{config.BRAND_NAME}</b> необходимо подписаться на наш official канал:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
         )
         return
-
+        
+    # 5. ВЫВОД ГЛАВНОГО МЕНЮ ДЛЯ КЛИЕНТА
     await message.answer(
         text=f"👋 Добро пожаловать в <b>{config.BRAND_NAME}</b>!\n\nИспользуйте меню ниже для управления вашим доступом:",
         reply_markup=get_main_menu_keyboard()
