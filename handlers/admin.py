@@ -281,6 +281,8 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         # Целевая дата, которую мы ДОЛЖНЫ выставить на панелях (60 дней премиума)
         active_end_date = active_subscription_object.expires_at
 
+# handlers/admin.py — ИСПРАВЛЕННЫЙ ЦИКЛ БЕЗ ДУБЛИКАТОВ ELSE
+
         for srv in servers:
             if now_active_plan == SubscriptionType.PREMIUM:
                 ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_([SubscriptionType.BASE, SubscriptionType.PREMIUM]))
@@ -308,11 +310,12 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
             else:
                 # ВЕТКА КЛЮЧ УЖЕ ЕСТЬ (СЕРВЕР Base-1/Main-1) — БЕЗОПАСНЫЙ СДВИГ ВРЕМЕНИ
                 current_key = existing_keys[srv.id]
+                expiry_timestamp = int(active_end_date.timestamp() * 1000)
                 
-                # 1. Сначала перенарезаем инбаунды под новый PREMIUM-пул портов
-                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=days)
+                # 1. Перенарезаем инбаунды под пул портов Премиума, передавая точный таймштамп
+                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expiry_time=expiry_timestamp)
                 
-                # 2. Запрашиваем из панели текущую карточку клиента, чтобы узнать, сколько дней там сейчас реально выставлено
+                # 2. Запрашиваем из панели текущую карточку клиента, чтобы узнать дельту дней
                 path_get = f"panel/api/clients/get/{current_key.client_email}"
                 res_get = await xui._request("GET", path_get)
                 
@@ -324,28 +327,17 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                     current_expiry_date = datetime.datetime.fromtimestamp(current_expiry_ts)
                     
                     # Считаем разницу между целевой датой премиума (60 дней) и тем, что сейчас есть на панели (30 дней)
-                    # Если разница положительная — сдвигаем вперед, если отрицательная — назад
                     days_delta = (active_end_date - current_expiry_date).days
                     
-                    # 3. Вызываем официальный bulkAdjust для жесткого пробития кэша инбаундов!
+                    # 3. Вызываем bulkAdjust для жесткого пробития кэша инбаундов
                     if days_delta != 0:
                         await xui.adjust_client_days(emails=[current_key.client_email], add_days=days_delta)
-            else:
-                # ОСТАВЛЯЕМ КЛЮЧ В БД КАК ЕСТЬ (БЕЗ ПЕРЕПРИВЯЗОК ID)
-                current_key = existing_keys[srv.id]
+                else:
+                    # Запасной вариант, если панель временно не отдала карточку
+                    await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
                 
-                # Рассчитываем точный таймштамп для панели (60 дней премиума)
-                expiry_timestamp = int(active_end_date.timestamp() * 1000)
-                
-                # ИСПРАВЛЕНО: Передаем имя аргумента expiry_time вместо expires_days!
-                await xui.update_client_inbounds(
-                    email=current_key.client_email, 
-                    sub_id=current_key.sub_id, 
-                    inbound_ids=inbound_ids, 
-                    expiry_time=expiry_timestamp
-                )
-                await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
                 nodes_synced += 1
+
 
     await db_session.commit()
     await message.answer(text=f"⚡ <b>CRM Синхронизация завершена!</b>\n\n• Начислено: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n• Статус: <i>{msg_status}</i>\n• Синхронизировано нод: <b>{nodes_synced} шт.</b>")
