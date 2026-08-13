@@ -106,3 +106,23 @@ class XUIMultiClient:
         res = await self._request("POST", path_update, json_data=client_data)
         return res is not None and res.get("success", False)
 
+
+    async def update_client_inbounds(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int) -> bool:
+        """Перенарезает список инбаундов (inboundIds) для существующего глобального мульти-клиента"""
+        expiry_time = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp() * 1000)
+        
+        payload = {
+            "id": sub_id,
+            "email": email,
+            "limitIp": 0,
+            "totalGB": 0,
+            "expiryTime": expiry_time,
+            "enable": True,
+            "subId": sub_id,
+            "inboundIds": inbound_ids  # Новые порты тарифа
+        }
+        
+        # Согласно OAS 3.0 спецификации, отправляем на эндпоинт обновления мульти-клиента
+        path = f"panel/api/clients/update/{sub_id}"
+        res = await self._request("POST", path, json_data=payload)
+        return res is not None and res.get("success", False)
