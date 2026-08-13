@@ -36,10 +36,9 @@ class XUIMultiClient:
         return []
 
     async def add_client(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int) -> bool:
-        """ИСПРАВЛЕНО ПО ДОКУМЕНТАЦИИ: создание клиента сразу во всех инбаундах"""
+        """Добавление клиента с автоматической защитой от дубликатов"""
         expiry_time = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp() * 1000)
         
-        # Согласно скриншоту, отправляем один универсальный запрос
         payload = {
             "id": sub_id,
             "email": email,
@@ -48,13 +47,22 @@ class XUIMultiClient:
             "expiryTime": expiry_time,
             "enable": True,
             "subId": sub_id,
-            "inboundIds": inbound_ids  # Передаем массив портов одной пачкой!
+            "inboundIds": inbound_ids
         }
         
-        # Новый эндпоинт со скриншота
         path = "panel/api/clients/add"
         res = await self._request("POST", path, json_data=payload)
-        return res is not None and res.get("success", False)
+        
+        # Если панель вернула успех — отлично, выходим
+        if res and res.get("success"):
+            return True
+            
+        # АВТО-ЗАЩИТА: Если панель вернула success=False (клиент уже есть),
+        # мы принудительно вызываем метод продления/обновления, чтобы не рушить подписку!
+        logger.warning(f"Панель отклонила создание {email} (возможно дубликат). Запускаю принудительное обновление параметров...")
+        update_success = await self.update_client_expiry(email, expiry_time)
+        return update_success
+
 
 # services/xui.py — ШАГ 2 ИЗ 2 (ПРОДЛЕНИЕ ПО НОВОМУ СТАНДАРТУ)
 
