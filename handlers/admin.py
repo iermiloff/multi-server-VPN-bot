@@ -307,9 +307,9 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                 # ОСТАВЛЯЕМ КЛЮЧ В БД КАК ЕСТЬ (БЕЗ ПЕРЕПРИВЯЗОК ID)
                 current_key = existing_keys[srv.id]
                 
-                # По API на панели 3x-ui принудительно накатываем новые порты PREMIUM и выставляем 60 дней!
-                await srv_client.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=days)
-                await srv_client.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
+                # ИСПРАВЛЕНО: Заменили srv_client на xui, чтобы убрать NameError!
+                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=days)
+                await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
                 nodes_synced += 1
 
     await db_session.commit()
