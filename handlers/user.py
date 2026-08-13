@@ -44,6 +44,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="menu_profile")],
         [InlineKeyboardButton(text="💎 Купить подписку", callback_data="menu_buy")],
+        [InlineKeyboardButton(text="👥 Партнерская программа", callback_data="menu_referral")],
         [InlineKeyboardButton(text="🎁 Месяц от партнеров", callback_data="menu_partner_gift")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
