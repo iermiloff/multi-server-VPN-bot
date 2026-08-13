@@ -35,26 +35,26 @@ class XUIMultiClient:
             return res.get("obj", [])
         return []
 
-# services/xui.py — ИСПРАВЛЕННЫЙ МЕТОД СОГЛАСНО СПЕЦИФИКАЦИИ ПАНЕЛИ
 
-# services/xui.py — ВНУТРИ КЛАССА XUIMultiClient
-
-    async def add_client(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int) -> bool:
-        """Добавление мульти-клиента во все инбаунды по официальной спецификации"""
+    async def add_client(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int, plan_type: str = "base") -> bool:
+        """Добавление мульти-клиента во все инбаунды по спецификации с лимитами IP и трафика"""
         expiry_time = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp() * 1000)
         
-        # ИСПРАВЛЕНО: Обернули параметры в объект "client" согласно JSON-схеме панели
+        # Рассчитываем лимит трафика в байтах: 150 ГБ для BASE, 300 ГБ для PREMIUM
+        gb_limit = 300 if plan_type.lower() == "premium" else 150
+        total_bytes = gb_limit * 1024 * 1024 * 1024
+        
         payload = {
             "client": {
-                "id": sub_id,        # Уникальный UUID ключа
-                "email": email,      # Email пользователя
-                "limitIp": 0,
-                "totalGB": 0,
+                "id": sub_id,
+                "email": email,
+                "limitIp": 3,          # Жесткий лимит: не более 3-х одновременных IP устройств
+                "totalGB": total_bytes, # Лимит трафика в байтах
                 "expiryTime": expiry_time,
                 "enable": True,
-                "subId": sub_id      # Хвост ссылки подписки
+                "subId": sub_id
             },
-            "inboundIds": inbound_ids  # Список портов тарифа на верхнем уровне
+            "inboundIds": inbound_ids
         }
         
         path = "panel/api/clients/add"
@@ -64,18 +64,15 @@ class XUIMultiClient:
             async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.request("POST", url, headers=self.headers, json=payload, timeout=10) as response:
                     res = await response.json()
-                    
                     if response.status in (200, 201) and res.get("success"):
-                        logger.info(f"✅ Клиент {email} успешно создан в глобальной базе панели пачкой на порты {inbound_ids}")
+                        logger.info(f"✅ Мульти-клиент {email} успешно создан с лимитом {gb_limit} ГБ и 3 IP")
                         return True
-                        
-                    logger.error(f"❌ Панель отклонила создание клиента {email}. Ответ панели: {res}")
-                    
-                    # Запасной путь обновления, если клиент уже существовал
-                    return await self.update_client_expiry_by_payload(email, payload["client"])
+                    logger.error(f"❌ Панель отклонила создание клиента {email}: {res}")
+                    return False
         except Exception as e:
             logger.error(f"Сетевой сбой при добавлении мульти-клиента: {e}")
             return False
+
 
 # services/xui.py — ШАГ 2 ИЗ 2
 
