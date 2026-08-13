@@ -303,12 +303,26 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                     key_record = VPNKey(subscription_id=prem_sub.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=subscribe_url)
                     db_session.add(key_record)
                     nodes_synced += 1
+
             else:
-                # ОСТАВЛЯЕМ КЛЮЧ В БД КАК ЕСТЬ (БЕЗ ПЕРЕПРИВЯЗОК ID)
-                current_key = existing_keys[srv.id]       
-                expiry_timestamp = int(active_end_date.timestamp() * 1000)
-                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expiry_time=expiry_timestamp)
-                nodes_synced += 1
+                # ОСТАВЛЯЕМ КЛЮЧ В БД БОТА КАК ЕСТЬ (БЕЗ ПЕРЕПРИВЯЗОК ID)
+                current_key = existing_keys[srv.id]
+                
+                path_delete = f"panel/api/clients/del/{current_key.client_email}"
+                await xui._request("POST", path_delete)
+                
+                success = await xui.add_client(
+                    email=current_key.client_email, 
+                    sub_id=current_key.sub_id, 
+                    inbound_ids=inbound_ids, 
+                    expires_days=days
+                )
+                
+                if success:
+                    nodes_synced += 1
+                else:
+                    logger.error(f"Не удалось перенарезать тариф для {current_key.client_email} на сервере {srv.name}")
+
 
     await db_session.commit()
     await message.answer(text=f"⚡ <b>CRM Синхронизация завершена!</b>\n\n• Начислено: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n• Статус: <i>{msg_status}</i>\n• Синхронизировано нод: <b>{nodes_synced} шт.</b>")
