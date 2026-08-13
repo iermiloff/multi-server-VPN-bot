@@ -607,9 +607,14 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id)
     ib_res = await db_session.execute(ib_stmt)
     db_inbounds = {i.inbound_id: i.plan_type for i in ib_res.scalars().all()}
-
     text = f"🖥 <b>Управление нодой: {srv.name}</b>\n└ URL: <code>{srv.api_url}</code>\n\n⚙️ <b>Настройка тарифов портов Xray:</b>"
-    kb = [[InlineKeyboardButton(text="✏️ Редактировать ноду", callback_data=f"adm_srv_edit_{srv.id}"), InlineKeyboardButton(text="🗑 Удалить ноду", callback_data=f"adm_srv_del_{srv.id}")]]
+    
+    # Собираем клавиатуру: кнопка синхронизации встанет первым удобным рядом под текстом
+    kb = [
+        [InlineKeyboardButton(text="🔄 Синхронизировать активных клиентов", callback_data=f"adm_srv_sync_users_{srv.id}")],
+        [InlineKeyboardButton(text="✏️ Редактировать ноду", callback_data=f"adm_srv_edit_{srv.id}"), 
+         InlineKeyboardButton(text="🗑 Удалить ноду", callback_data=f"adm_srv_del_{srv.id}")]
+    ]
 
     for ib in all_inbounds:
         ib_id = int(ib.get("id"))
