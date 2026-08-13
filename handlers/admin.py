@@ -255,6 +255,9 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
 
     await db_session.flush()
     nodes_synced = 0
+    
+    # Определяем, какая именно подписка сейчас активна на экране прямо сейчас
+    active_subscription_object = prem_sub if (prem_sub and not prem_sub.is_pending and prem_sub.expires_at > now) else base_sub
     now_active_plan = active_subscription_object.plan_type if active_subscription_object else None
 
     if now_active_plan:
@@ -268,7 +271,7 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         keys_res = await db_session.execute(keys_stmt)
         existing_keys = {k.server_id: k for k in keys_res.scalars().all()}
         
-        # На ВСЕХ серверах (и BASE, и PREMIUM) выставляем время окончания текущей главной подписки (60 дней Премиума)!
+        # Целевая дата окончания для серверов (например, 60 дней премиума)
         active_end_date = active_subscription_object.expires_at
         expiry_timestamp = int(active_end_date.timestamp() * 1000)
 
@@ -285,29 +288,30 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
             xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
             
             if srv.id not in existing_keys:
-                # Нарезка аккаунта с нуля на новых нодах
+                # Если ключа на ноде не было — создаем его с нуля
                 success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days)
                 if success:
                     protocol = "https" if srv.api_url.startswith("https") else "http"
                     raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
                     clean_host = raw_host.split(":")
                     subscribe_url = f"{protocol}://{clean_host}:{srv.sub_port}/{srv.sub_path}/{sub_id}"
+                    
+                    # Пишем ключ строго к ID той подписки, к которой он принадлежит!
                     key_record = VPNKey(subscription_id=active_subscription_object.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=subscribe_url)
                     db_session.add(key_record)
                     nodes_synced += 1
             else:
-                # ПЕРЕНАРЕЗКА И ПРОДЛЕНИЕ: Если ключ уже был (на BASE сервере), мы перепривязываем его 
-                # к ID новой активной подписки Премиума в СУБД бота, отправляем пачку inboundIds 
-                # премиума по мульти-API и выставляем на панели 3x-ui время 60 дней!
+                # ИСПРАВЛЕНО: Если ключ уже есть, мы НЕ меняем его привязку в БД бота (оставляем базу к базе).
+                # По API вызываем обновление инбаундов и выставляем новые 60 дней премиума на панели 3x-ui!
                 current_key = existing_keys[srv.id]
-                current_key.subscription_id = active_subscription_object.id
                 
-                # Мульти-API обновит порты и выставит 60 дней на панели
-                await xui.add_client(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=1)
+                # Мульти-API обновит порты и пропишет новые 60 дней на панели без ошибок дубликатов
+                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=days)
                 await xui.update_client_expiry(email=current_key.client_email, expiry_time=expiry_timestamp)
                 nodes_synced += 1
 
     await db_session.commit()
+
     await message.answer(text=f"⚡ <b>CRM Синхронизация завершена!</b>\n\n• Начислено: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n• Статус: <i>{msg_status}</i>\n• Синхронизировано нод: <b>{nodes_synced} шт.</b>")
     await render_user_card(message, db_session, target_id)
 
