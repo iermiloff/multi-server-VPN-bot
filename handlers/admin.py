@@ -306,14 +306,18 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                     db_session.add(key_record)
                     nodes_synced += 1
 
+
             else:
                 current_key = existing_keys[srv.id]
                 expiry_timestamp = int(active_end_date.timestamp() * 1000)
                 
+                target_gb = 300 if now_active_plan == SubscriptionType.PREMIUM else 150
+                target_bytes = target_gb * 1024 * 1024 * 1024
+                
                 # Принудительно привязываем клиента к инбаундам тарифа
                 await xui.attach_client_inbounds(email=current_key.client_email, inbound_ids=inbound_ids)
                 
-                # Подтягиваем оригинальные ID панели для жесткого продления времени
+                # Подтягиваем оригинальные ID панели для жесткого продления времени и лимитов
                 path_get = f"panel/api/clients/get/{current_key.client_email}"
                 res_get = await xui._request("GET", path_get)
                 
@@ -321,27 +325,28 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                     client_panel_data = res_get.get("obj")
                     real_panel_id = client_panel_data.get("id")
                     real_panel_sub_id = client_panel_data.get("subId")
-                    current_total_gb = client_panel_data.get("totalGB", 0)
-                    current_limit_ip = client_panel_data.get("limitIp", 3)
                     
                     payload = {
                         "id": real_panel_id,
                         "email": current_key.client_email,
-                        "totalGB": current_total_gb,    # Сохраняем тот лимит, что уже был
-                        "expiryTime": expiry_timestamp,  # Обновляем только дни!
+                        "totalGB": target_bytes,         # ИСПРАВЛЕНО: Принудительно выставляем 300 ГБ (или 150 ГБ)
+                        "expiryTime": expiry_timestamp,  # Обновляем дни
                         "subId": real_panel_sub_id,
-                        "limitIp": current_limit_ip,
+                        "limitIp": 3,                    # Гарантируем лимит в 3 устройства
                         "enable": True
                     }
                     
                     path_update = f"panel/api/clients/update/{current_key.client_email}"
                     await xui._request("POST", path_update, json_data=payload)
+                    
+                    # ИСПРАВЛЕНО: Сбрасываем счетчик скачанного трафика на ноль, 
+                    # так как у пользователя повысился уровень доступа и начался новый пакет!
+                    path_reset_traffic = f"panel/api/clients/resetTraffic/{current_key.client_email}"
+                    await xui._request("POST", path_reset_traffic)
                 else:
                     await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
                 
                 nodes_synced += 1
-
-
 
     await db_session.commit()
     await message.answer(text=f"⚡ <b>CRM Синхронизация завершена!</b>\n\n• Начислено: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n• Статус: <i>{msg_status}</i>\n• Синхронизировано нод: <b>{nodes_synced} шт.</b>")
