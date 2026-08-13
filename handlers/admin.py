@@ -418,69 +418,67 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# handlers/admin.py — ИСПРАВЛЕННЫЙ ХЕНДЛЕР С УЧЕТОМ ДЛИННЫХ UUID СЭНДВИЧЕЙ
-
-@admin_router.callback_query(F.data.startswith("adm_toggle_ib_"))
-async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
-    """Циклическое переключение тарифа инбаунда: НЕАКТИВЕН -> BASE -> PREMIUM -> НЕАКТИВЕН"""
-    # Удаляем префикс, чтобы осталась только дата: "IDСЕРВЕРА_IDИНБАУНДА"
-    raw_data = callback.data.replace("adm_toggle_ib_", "")
+@admin_router.callback_query(F.data.startswith("adm_srv_manage_") | F.data.startswith("adm_toggle_ib_"))
+async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
+    """Экран управления конкретной нодой и её портами с поддержкой длинных UUID"""
+    await callback.answer()
     
-    # Разбиваем строго по первому знаку подчеркивания
-    # maxsplit=1 гарантирует, что даже если в UUID инбаунда куча подчеркиваний, они не разобьются
-    parts = raw_data.split("_", 1)
+    # ИСПРАВЛЕНО: Безопасно вытаскиваем ID сервера в зависимости от того, какая кнопка нажата
+    if callback.data.startswith("adm_toggle_ib_"):
+        # Если пришли из переключателя тарифов, убираем префикс и берем ПЕРВЫЙ элемент до UUID
+        raw_data = callback.data.replace("adm_toggle_ib_", "")
+        server_id = int(raw_data.split("_")[0])
+    else:
+        # Если пришли напрямую из списка серверов
+        server_id = int(callback.data.split("_")[-1])
     
-    server_id = int(parts[0])
-    ib_id = int(parts[1]) if parts[1].isdigit() else parts[1] # Поддержка и чисел, и строковых UUID
-
     stmt = select(Server).where(Server.id == server_id)
     res = await db_session.execute(stmt)
     srv = res.scalar_one_or_none()
-
+    
     if not srv:
-        await callback.answer("❌ Сервер базы данных не найден!", show_alert=True)
+        await callback.message.edit_text("❌ Сервер базы данных не найден.")
         return
 
     xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
     all_inbounds = await xui.get_inbounds()
     
-    # Ищем инбаунд в панели (сравниваем типы данных динамически)
-    target_ib = next((i for i in all_inbounds if str(i.get("id")) == str(ib_id)), None)
-
-    if not target_ib:
-        await callback.answer("❌ Инбаунд не найден в панели 3x-ui!", show_alert=True)
+    if not all_inbounds:
+        await callback.message.edit_text(
+            text=f"❌ Не удалось получить инбаунды с ноды <b>{srv.name}</b>.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="◀️ Назад", callback_data="adm_servers_list")
+            ]])
+        )
         return
 
-    # В таблице БД inbound_id храним как String, чтобы поддерживать UUID-панели
-    ib_stmt = select(TariffInbound).where(
-        TariffInbound.server_id == server_id, 
-        func.cast(TariffInbound.inbound_id, String) == str(ib_id)
-    )
+    ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id)
     ib_res = await db_session.execute(ib_stmt)
-    ib_record = ib_res.scalar_one_or_none()
+    db_inbounds = {str(i.inbound_id): i.plan_type for i in ib_res.scalars().all()}
 
-    if not ib_record:
-        # 1. Если порта нет в БД -> переводим в BASE
-        new_record = TariffInbound(
-            server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=str(ib_id),
-            protocol_name=target_ib.get("protocol", "unknown"), port=target_ib.get("port", 0),
-            remark=target_ib.get("remark", "")
-        )
-        db_session.add(new_record)
-        await callback.answer("🟢 Переведено в тариф BASE")
-    elif ib_record.plan_type == SubscriptionType.BASE:
-        # 2. Если порт в BASE -> переводим в PREMIUM
-        ib_record.plan_type = SubscriptionType.PREMIUM
-        await callback.answer("💎 Переведено в тариф PREMIUM")
-    else:
-        # 3. Если порт в PREMIUM -> удаляем привязку (НЕАКТИВЕН)
-        await db_session.delete(ib_record)
-        await callback.answer("⚫ Порт полностью деактивирован")
+    text = (
+        f"⚙️ <b>Настройка тарифов для ноды: {srv.name}</b>\n\n"
+        f"Кликните по инбаунду, чтобы изменить его тарифный план. "
+        f"Пользователи тарифа PREMIUM автоматически получают доступ и к портам тарифа BASE:\n\n"
+    )
+    kb = []
 
-    await db_session.commit()
-    
-    # Обновляем экран, передавая аргументы в правильном позиционном порядке
-    await cb_adm_srv_manage(callback, db_session)
+    for ib in all_inbounds:
+        ib_id = str(ib.get("id"))
+        current_plan = db_inbounds.get(ib_id, "❌ ОТКЛЮЧЕН")
+        
+        if current_plan == "base":
+            badge = "🟢 BASE"
+        elif current_plan == "premium":
+            badge = "💎 PREMIUM"
+        else:
+            badge = "⚫ НЕАКТИВЕН"
+        
+        btn_text = f"[{ib_id[:8]}...] {ib.get('protocol', '').upper()} ({ib.get('remark', '')}) -> {badge}"
+        kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"adm_toggle_ib_{srv.id}_{ib_id}")])
+
+    kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
+    await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 
 # handlers/admin.py — ШАГ 4.3
