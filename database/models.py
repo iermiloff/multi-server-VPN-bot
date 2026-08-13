@@ -65,7 +65,7 @@ class Subscription(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
-    plan_type: Mapped[SubscriptionType] = mapped_column(Enum(SubscriptionType))
+    plan_type: Mapped[SubscriptionType] = mapped_column(SubscriptionType)
     expires_at: Mapped[datetime.datetime] = mapped_column(DateTime)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("'1'"))
     is_pending: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("'0'"))
