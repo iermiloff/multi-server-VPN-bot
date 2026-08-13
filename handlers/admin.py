@@ -331,7 +331,7 @@ async def msg_srv_sub_path(message: Message, state: FSMContext, db_session: Asyn
 
 @admin_router.callback_query(F.data.startswith("adm_srv_manage_"))
 async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
-    """Кабинет управления нодой с кнопкой 1-click синхронизации всех клиентов"""
+    """Кабинет управления нодой с кнопкой 1-click синхронизации и цветными маркерами"""
     if callback: await callback.answer()
     server_id = int(callback.data.split("_")[-1])
     srv = (await db_session.execute(select(Server).where(Server.id == server_id))).scalar_one_or_none()
@@ -340,24 +340,36 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     all_inbounds = await xui.get_inbounds()
     
     if not all_inbounds:
-        await callback.message.edit_text(text=f"❌ <b>Нода {srv.name} недоступна по API!</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"adm_srv_edit_{srv.id}")], [InlineKeyboardButton(text="◀️ Назад", callback_data="adm_servers_list")]]))
+        await callback.message.edit_text(
+            text=f"❌ <b>Нода {srv.name} недоступна по API!</b>", 
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"adm_srv_edit_{srv.id}")],
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="adm_servers_list")]
+            ])
+        )
         return
         
     db_inbounds = {i.inbound_id: i.plan_type for i in (await db_session.execute(select(TariffInbound).where(TariffInbound.server_id == srv.id))).scalars().all()}
-    text = f"🖥 <b>Управление нодой: {srv.name}</b>\n└ URL: <code>{srv.api_url}</code>\n\n⚙️ <b>Порты Xray:</b>"
+    text = f"🖥 <b>Управление нодой: {srv.name}</b>\n└ URL: <code>{srv.api_url}</code>\n\n⚙️ <b>Настройка тарифов портов Xray:</b>"
     
     kb = [
         [InlineKeyboardButton(text="🔄 Синхронизировать активных клиентов", callback_data=f"adm_srv_sync_users_{srv.id}")],
-        [InlineKeyboardButton(text="✏️ Редактировать ноду", callback_data=f"adm_srv_edit_{srv.id}"), InlineKeyboardButton(text="🗑 Удалить ноду", callback_data=f"adm_srv_del_{srv.id}")]
+        [InlineKeyboardButton(text="✏️ Редактировать ноду", callback_data=f"adm_srv_edit_{srv.id}"), 
+         InlineKeyboardButton(text="🗑 Удалить ноду", callback_data=f"adm_srv_del_{srv.id}")]
     ]
+    
     for ib in all_inbounds:
         ib_id = int(ib.get("id"))
         current_plan = db_inbounds.get(ib_id, "❌ОТКЛЮЧЕН")
-        badge = " BASE" if current_plan == "base" else " PREMIUM" if current_plan == "premium" else "⚫НЕАКТИВЕН"
+        # ВОЗВРАЩЕНО: Сочные маркеры активности тарифов для главного экрана сервера
+        badge = "🟢 BASE" if current_plan == "base" else "🔴 PREMIUM" if current_plan == "premium" else "⚫ НЕАКТИВЕН"
         kb.append([InlineKeyboardButton(text=f"[{ib_id}] {ib.get('protocol','').upper()} ({ib.get('remark','')}) -> {badge}", callback_data=f"adm_toggle_ib_{srv.id}_{ib_id}")])
+        
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
+    
     try: await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     except Exception: pass
+
 
 @admin_router.callback_query(F.data.startswith("adm_srv_sync_users_"))
 async def cb_adm_srv_sync_users(callback: CallbackQuery, db_session: AsyncSession):
@@ -428,7 +440,6 @@ async def cb_adm_ref_payouts_list(callback: CallbackQuery, db_session: AsyncSess
 
 @admin_router.callback_query(F.data.startswith("adm_toggle_ib_"))
 async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
-    """Переключение тарифов инбаундов ноды (BASE <=> PREMIUM <=> ОТКЛЮЧЕН)"""
     raw_data = callback.data.replace("adm_toggle_ib_", "")
     parts = raw_data.split("_", 1)
     server_id = int(parts[0])
@@ -442,17 +453,39 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
     ib_record = (await db_session.execute(select(TariffInbound).where(TariffInbound.server_id == server_id, TariffInbound.inbound_id == ib_id))).scalar_one_or_none()
     
     if not ib_record:
-        db_session.add(TariffInbound(server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=ib_id, protocol_name=target_ib.get("protocol", "unknown"), port=target_ib.get("port", 0), remark=target_ib.get("remark", "")))
-        await callback.answer("Переведено в тариф BASE")
+        db_session.add(TariffInbound(
+            server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=ib_id, 
+            protocol_name=target_ib.get("protocol", "unknown"), port=target_ib.get("port", 0), 
+            remark=target_ib.get("remark", "")
+        ))
+        await callback.answer("🟩 Переведено в тариф BASE")
     elif ib_record.plan_type == SubscriptionType.BASE:
         ib_record.plan_type = SubscriptionType.PREMIUM
-        await callback.answer("Переведено в тариф PREMIUM")
+        await callback.answer("👑 Переведено в тариф PREMIUM")
     else:
         await db_session.delete(ib_record)
         await callback.answer("⚫ Инбаунд деактивирован")
         
     await db_session.commit()
-    await cb_adm_srv_manage(callback, db_session)
+
+    db_inbounds_new = {i.inbound_id: i.plan_type for i in (await db_session.execute(select(TariffInbound).where(TariffInbound.server_id == srv.id))).scalars().all()}
+    text = f"🖥 <b>Управление нодой: {srv.name}</b>\n└ URL: <code>{srv.api_url}</code>\n\n⚙️ <b>Настройка тарифов портов Xray:</b>"
+    
+    kb = [
+        [InlineKeyboardButton(text="🔄 Синхронизировать активных клиентов", callback_data=f"adm_srv_sync_users_{srv.id}")],
+        [InlineKeyboardButton(text="✏️ Редактировать ноду", callback_data=f"adm_srv_edit_{srv.id}"), 
+         InlineKeyboardButton(text="🗑 Удалить ноду", callback_data=f"adm_srv_del_{srv.id}")]
+    ]
+    for ib in all_inbounds:
+        current_ib_id = int(ib.get("id"))
+        current_plan = db_inbounds_new.get(current_ib_id, "❌ОТКЛЮЧЕН")
+        badge = "🟢 BASE" if current_plan == "base" else "🔴 PREMIUM" if current_plan == "premium" else "⚫ НЕАКТИВЕН"
+        kb.append([InlineKeyboardButton(text=f"[{current_ib_id}] {ib.get('protocol','').upper()} ({ib.get('remark','')}) -> {badge}", callback_data=f"adm_toggle_ib_{srv.id}_{current_ib_id}")])
+        
+    kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
+    
+    try: await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    except Exception: pass
 
 @admin_router.callback_query(F.data == "adm_partners_list")
 async def cb_adm_partners_list(callback: CallbackQuery, db_session: AsyncSession):
