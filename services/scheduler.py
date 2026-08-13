@@ -11,29 +11,26 @@ from services.xui import XUIMultiClient
 
 logger = logging.getLogger(__name__)
 
+
 async def deactivate_user_on_servers(session, user_id: int):
-    """Каскадный снос аккаунтов со всех панелей 3x-ui"""
+    """Полное каскадный снос аккаунтов мульти-клиента по email со всех панелей 3x-ui"""
+    # Вытаскиваем все ключи пользователя из базы данных бота
     keys_stmt = select(VPNKey).join(Subscription).where(Subscription.user_id == user_id).options(selectinload(VPNKey.server))
     keys_res = await session.execute(keys_stmt)
     keys = keys_res.scalars().all()
     
     for key in keys:
-        if key.server:
-            # Напрямую удаляем по API
-            import json
+        if key.server and key.server.is_active:
             xui = XUIMultiClient(api_url=key.server.api_url, api_token=key.server.api_token)
-            inbounds = await xui.get_inbounds()
-            for ib in inbounds:
-                settings = ib.get("settings", {})
-                if isinstance(settings, str):
-                    try: settings = json.loads(settings)
-                    except Exception: continue
-                clients = settings.get("clients", [])
-                for client in clients:
-                    if client.get("email") == key.client_email:
-                        path = f"panel/api/inbounds/deleteClient/{ib.get('id')}/{client.get('id')}"
-                        await xui._request("POST", path)
+            
+            # ИСПРАВЛЕНО СОГЛАСНО СТР. 9 ДОКУМЕНТАЦИИ:
+            # Вместо перебора портов шлем один точечный POST-запрос на полное глобальное удаление мульти-клиента по его email!
+            path_delete = f"panel/api/clients/del/{key.client_email}"
+            await xui._request("POST", path_delete)
+            
+            # Удаляем сам ключ из базы данных бота
             await session.delete(key)
+
 
 async def check_partner_subscriptions_job(bot: Bot):
     """Проверяет сроки подписок и активирует отложенные тарифы из очереди"""
