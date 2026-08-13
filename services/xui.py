@@ -44,7 +44,7 @@ class XUIMultiClient:
                 "id": sub_id, "email": email, "limitIp": 0, "totalGB": 0,
                 "expiryTime": expiry_time, "enable": True, "tgId": "", "subId": sub_id
             }
-            path = f"panel/api/inbounds/addClient"
+            path = f"panel/api/inbounds/addClient/"
             payload = {"id": ib_id, "settings": json.dumps({"clients": [client_data]})}
             res = await self._request("POST", path, json_data=payload)
             if res and res.get("success"):
@@ -70,7 +70,7 @@ class XUIMultiClient:
                     inbound_id = ib.get("id")
                     client["expiryTime"] = expiry_time
                     
-                    path = f"panel/api/inbounds/updateClient/{client_id}"
+                    path = f"panel/api/inbounds/updateClient/{client_id}/"
                     payload = {"id": inbound_id, "settings": json.dumps({"clients": [client]})}
                     res = await self._request("POST", path, json_data=payload)
                     return res is not None and res.get("success", False)
