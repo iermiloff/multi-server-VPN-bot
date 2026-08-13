@@ -35,30 +35,48 @@ class XUIMultiClient:
             return res.get("obj", [])
         return []
 
+# services/xui.py — ИСПРАВЛЕННЫЙ МЕТОД СОГЛАСНО СПЕЦИФИКАЦИИ ПАНЕЛИ
+
     async def add_client(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int) -> bool:
-        """Создание клиента пачкой во всех инбаундах согласно OAS 3.0 документации"""
+        """Добавление мульти-клиента во все инбаунды по официальной спецификации"""
         expiry_time = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp() * 1000)
         
+        # Отправляем ТОЛЬКО универсальные поля, как требует документация на странице 9.
+        # Поле "id" убрано — панель сама сгенерирует UUID на сервере!
         payload = {
-            "id": sub_id,
             "email": email,
             "limitIp": 0,
             "totalGB": 0,
             "expiryTime": expiry_time,
             "enable": True,
-            "subId": sub_id,
-            "inboundIds": inbound_ids  # Массив числовых ID инбаундов
+            "subId": sub_id,         # Идентификатор подписки (хвост ссылки)
+            "inboundIds": inbound_ids  # Список портов тарифа
         }
         
         path = "panel/api/clients/add"
-        res = await self._request("POST", path, json_data=payload)
         
-        if res and res.get("success"):
-            return True
-            
-        # АВТО-ЗАЩИТА: Если email уже занят в глобальной базе, вызываем принудительное обновление
-        logger.warning(f"Панель отклонила создание {email} (дубликат). Запускаю принудительное обновление параметров...")
-        return await self.update_client_expiry_by_payload(email, payload)
+        # Делаем чистый запрос к API
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.request("POST", url, headers=self.headers, json=payload, timeout=10) as response:
+                    res = await response.json()
+                    
+                    if response.status in (200, 201) and res.get("success"):
+                        logger.info(f"✅ Клиент {email} успешно создан в глобальной базе панели пачкой на порты {inbound_ids}")
+                        return True
+                        
+                    # Если панель вернула success=False — пишем в лог РЕАЛЬНУЮ причину отказа панели!
+                    logger.error(f"❌ Панель отклонила создание клиента {email}. Ответ панели: {res}")
+                    
+                    # Пытаемся вызвать обновление на случай, если это реально дубликат email
+                    payload["id"] = email # Для обновления используем email как ключ
+                    return await self.update_client_expiry_by_payload(email, payload)
+        except Exception as e:
+            logger.error(f"Сетевой сбой при добавлении мульти-клиента: {e}")
+            return False
+
 
 # services/xui.py — ШАГ 2 ИЗ 2
 
