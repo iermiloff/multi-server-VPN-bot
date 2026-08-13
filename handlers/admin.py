@@ -418,7 +418,7 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# handlers/admin.py — ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ И АДАПТИРОВАННЫЙ БЛОК ИНБАУНДОВ
+# handlers/admin.py — ИСПРАВЛЕННЫЙ МЕТОД РЕНДЕРИНГА МЕНЮ
 
 @admin_router.callback_query(F.data.startswith("adm_srv_manage_") | F.data.startswith("adm_toggle_ib_"))
 async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
@@ -453,8 +453,12 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
 
     ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id)
     ib_res = await db_session.execute(ib_stmt)
-    # Приводим ключи к единому строковому виду без пробелов
-    db_inbounds = {str(i.inbound_id).strip(): i.plan_type for i in ib_res.scalars().all()}
+    
+    # ИСПРАВЛЕНО: Максимально жесткая очистка ключей от пробелов для Integer и String колонок
+    db_inbounds = {}
+    for i in ib_res.scalars().all():
+        clean_key = str(i.inbound_id).strip().replace(" ", "")
+        db_inbounds[clean_key] = i.plan_type
 
     text = (
         f"⚙️ <b>Настройка тарифов для ноды: {srv.name}</b>\n\n"
@@ -464,7 +468,8 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     kb = []
 
     for ib in all_inbounds:
-        ib_id = str(ib.get("id")).strip()
+        # ИСПРАВЛЕНО: Приводим ID из панели к чистой строке без пробелов
+        ib_id = str(ib.get("id")).strip().replace(" ", "")
         current_plan = db_inbounds.get(ib_id, "❌ ОТКЛЮЧЕН")
         
         if current_plan == "base":
@@ -474,14 +479,19 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
         else:
             badge = "⚫ НЕАКТИВЕН"
         
-        # АДАПТИВНЫЙ ВЫВОД: Если ID длинный (UUID) — сокращаем, если короткий (число) — пишем целиком
         display_id = f"{ib_id[:5]}..." if len(ib_id) > 10 else ib_id
         
         btn_text = f"[{display_id}] {ib.get('protocol', '').upper()} ({ib.get('remark', '')}) -> {badge}"
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"adm_toggle_ib_{srv.id}_{ib_id}")])
 
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
-    await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    
+    # ИСПРАВЛЕНО: Защищаем метод edit_text от ложных срабатываний TelegramBadRequest
+    try:
+        await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    except Exception as e:
+        logger.debug(f"Игнорируем ошибку модификации сообщения Telegram: {e}")
+
 
 
 @admin_router.callback_query(F.data.startswith("adm_toggle_ib_"))
