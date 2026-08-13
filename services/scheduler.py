@@ -103,4 +103,76 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         hours=2,
         args=[bot]
     )
+    scheduler.add_job(
+        monthly_traffic_reset_job,
+        trigger="cron",
+        day=1,
+        hour=0,
+        minute=0,
+        id="monthly_traffic_reset"
+    )
+        
     return scheduler
+
+# services/scheduler.py — ЕЖЕМЕСЯЧНОЕ ОБНУЛЕНИЕ ТРАФИКА И ВЫСТАВЛЕНИЕ ЛИМИТОВ 1-ГО ЧИСЛА
+
+async def monthly_traffic_reset_job():
+    """Запускается 1-го числа каждого месяца: обновляет лимиты и обнуляет счетчики трафика активных юзеров"""
+    logger.info("🕒 Запуск ежемесячного воркера обновления лимитов трафика...")
+    now = datetime.datetime.utcnow()
+    
+    async with db_helper.session_factory() as session:
+        # Вытаскиваем все активные ноды
+        servers_res = await session.execute(select(Server).where(Server.is_active == True))
+        servers = servers_res.scalars().all()
+        
+        # Вытаскиваем все активные подписки из СУБД бота
+        stmt = select(Subscription).where(Subscription.is_active == True, Subscription.is_pending == False, Subscription.expires_at > now).options(selectinload(Subscription.keys))
+        res = await session.execute(stmt)
+        active_subs = res.scalars().all()
+        
+        # Группируем пользователей по их текущему активному тарифу
+        user_plans = {}
+        for sub in active_subs:
+            user_plans[sub.user_id] = sub.plan_type
+
+        for srv in servers:
+            xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
+            inbounds = await xui.get_inbounds()
+            
+            import json
+            for ib in inbounds:
+                settings = ib.get("settings", {})
+                if isinstance(settings, str):
+                    try: settings = json.loads(settings)
+                    except Exception: continue
+                    
+                for client in settings.get("clients", []):
+                    email = client.get("email", "")
+                    
+                    # Фильтруем только наших системных пользователей бота
+                    if email.startswith("usr_"):
+                        try:
+                            # Вытаскиваем Telegram ID из строки email (usr_TELEGRAMID_хэш)
+                            tg_id = int(email.split("_")[1])
+                        except (IndexError, ValueError):
+                            continue
+                            
+                        # Определяем, какой лимит выставить на новый месяц
+                        user_plan = user_plans.get(tg_id, SubscriptionType.BASE)
+                        gb_limit = 300 if user_plan == SubscriptionType.PREMIUM else 150
+                        target_bytes = gb_limit * 1024 * 1024 * 1024
+                        
+                        # Сохраняем текущие параметры карточки
+                        client["totalGB"] = target_bytes
+                        client["limitIp"] = 3
+                        
+                        # 1. Жестко прописываем лимит на панели на новый месяц
+                        path_update = f"panel/api/clients/update/{client.get('id')}"
+                        await xui._request("POST", path_update, json_data=client)
+                        
+                        # 2. Обнуляем счетчик скачанных гигабайт (стр. 12 документации)
+                        path_reset = f"panel/api/clients/resetTraffic/{email}"
+                        await xui._request("POST", path_reset)
+                        
+    logger.info("✅ Все счетчики трафика успешно обнулены, лимиты 150/300 ГБ обновлены!")
