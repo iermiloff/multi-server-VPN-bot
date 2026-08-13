@@ -1,11 +1,13 @@
 import datetime
 from enum import Enum
 from typing import List, Optional
-from sqlalchemy import String, BigInteger, DateTime, Boolean, ForeignKey, text, Table, Column, Enum as SQLEnum
+# ИСПРАВЛЕНО: Добавлен импорт типа Float из библиотеки sqlalchemy
+from sqlalchemy import String, BigInteger, DateTime, Boolean, ForeignKey, text, Table, Column, Float, Enum as SQLEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
+
 # Промежуточная таблица связей "Многие-ко-Многим" между юзером и его списком спонсоров
 user_partner_channels = Table(
     "user_partner_channels",
@@ -50,14 +52,16 @@ class User(Base):
     registered_at: Mapped[datetime.datetime] = mapped_column(default=datetime.datetime.utcnow)
     is_pro_ref: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("'0'"))
     crypto_wallet: Mapped[str] = mapped_column(String(150), nullable=True)
-    partner_balance_usd: Mapped[float] = mapped_column(DateTime, default=0.0, server_default=text("'0.0'"))
+    
+    # ИСПРАВЛЕНО: Изменен тип mapped_column с DateTime на Float для хранения баланса в USD
+    partner_balance_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("'0.0'"))
+    
     last_free_trial: Mapped[Optional[datetime.datetime]] = mapped_column(nullable=True)
     last_partner_trial: Mapped[Optional[datetime.datetime]] = mapped_column(nullable=True)
     has_active_partner_bonus: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     required_channels: Mapped[List["PartnerChannel"]] = relationship(
         secondary=lambda: user_partner_channels
     )
-
 
     subscriptions: Mapped[List["Subscription"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
@@ -114,4 +118,3 @@ class PaymentLog(Base):
     amount: Mapped[float] = mapped_column(BigInteger)
     paid_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
     ref_processed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("'0'"))
-
