@@ -359,12 +359,15 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
 
 @user_router.callback_query(F.data.startswith("check_invoice_"))
 async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSession):
-    """Метод пуллинга инвойса. Зачисление и распределение 1:1 / 10% CPA"""
+    """Метод пуллинга инвойса с атомарной защитой FOR UPDATE от двойного начисления"""
     invoice_id = int(callback.data.split("_")[-1])
     user_id = callback.from_user.id
+    stmt_lock = select(PaymentLog).where(PaymentLog.invoice_id == invoice_id).with_for_update()
+    log_check = await db_session.execute(stmt_lock)
     
-    if (await db_session.execute(select(PaymentLog).where(PaymentLog.invoice_id == invoice_id))).scalar_one_or_none():
-        await callback.answer("✅ Эта покупка уже успешно зачислена!", show_alert=True); return
+    if log_check.scalar_one_or_none():
+        await callback.answer("✅ Эта покупка уже успешно зачислена на твой аккаунт!", show_alert=True)
+        return
 
     status = await cryptobot_client.get_invoice_status(invoice_id)
     if not status: await callback.answer("⚠️ Ошибка связи с CryptoBot.", show_alert=True); return
