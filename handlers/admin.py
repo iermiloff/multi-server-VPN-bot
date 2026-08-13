@@ -509,7 +509,10 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
     """Чистое переключение тарифов инбаундов с изолированной сессией обновления"""
     raw_data = callback.data.replace("adm_toggle_ib_", "")
     parts = raw_data.split("_", 1)
-    server_id, ib_id = int(parts), int(parts.strip())
+    
+    # ИСПРАВЛЕНО: Четко указываем индексы элементов списка split
+    server_id = int(parts[0])
+    ib_id = int(parts[1].strip())
 
     stmt = select(Server).where(Server.id == server_id)
     res = await db_session.execute(stmt)
