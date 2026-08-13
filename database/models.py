@@ -27,6 +27,7 @@ class Server(Base):
     api_url: Mapped[str] = mapped_column(String(255), nullable=False)
     api_token: Mapped[str] = mapped_column(String(512), nullable=False)
     sub_port: Mapped[int] = mapped_column(default=2096)
+    sub_path: Mapped[str] = mapped_column(String(100), default="sub", server_default=text("'sub'"))
     is_active: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
     
     inbounds: Mapped[List["TariffInbound"]] = relationship(back_populates="server", cascade="all, delete-orphan")
