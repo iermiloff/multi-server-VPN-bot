@@ -305,6 +305,7 @@ async def cb_menu_partner_gift(callback: CallbackQuery, db_session: AsyncSession
     kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")])
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
+
 @user_router.callback_query(F.data == "claim_partner_bonus")
 async def cb_claim_partner_bonus(callback: CallbackQuery, db_session: AsyncSession, bot: Bot):
     channels = (await db_session.execute(select(PartnerChannel).where(PartnerChannel.is_required == False))).scalars().all()
@@ -316,9 +317,11 @@ async def cb_claim_partner_bonus(callback: CallbackQuery, db_session: AsyncSessi
                 return
         except Exception:
             await callback.answer("❌ Ошибка проверки каналов.", show_alert=True)
-                return
+            return  # <-- ИСПРАВЛЕНО: Теперь этот return стоит строго на уровне 12 пробелов от края!
+            
     await callback.message.edit_text("⏳ <i>Проверка пройдена! Нарезаем доступы...</i>")
     await provision_multiserver_subscription(callback, db_session)
+
 
 async def provision_multiserver_subscription(callback: CallbackQuery, db_session: AsyncSession):
     now = datetime.datetime.utcnow()
