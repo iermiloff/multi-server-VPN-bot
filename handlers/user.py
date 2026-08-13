@@ -110,9 +110,6 @@ async def cb_check_sub_again(callback: CallbackQuery, db_session: AsyncSession, 
     else:
         await callback.answer("❌ Вы всё еще не подписались на канал техподдержки!", show_alert=True)
 
-
-# handlers/user.py — ПОЛНОСТЬЮ ДИНАМИЧЕСКИЙ ЛИЧНЫЙ КАБИНЕТ (ВСЕ КЛЮЧИ В АКТИВНОМ ТАРИФЕ)
-
 @user_router.callback_query(F.data == "menu_profile")
 async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
     await callback.answer()
@@ -143,13 +140,11 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
     else:
         profile_text += "• Статус подписки: ✅ <b>Активна</b>\n\n🔗 <b>Ваши доступы и ссылки подписки:</b>\n"
         
-        # Собираем абсолютно ВСЕ ключи пользователя изо всех его подписок в один массив
         all_user_keys = []
         for s in user.subscriptions:
             for k in s.keys:
                 all_user_keys.append(k)
                 
-        # Сортируем подписки для вывода: сначала PREMIUM, потом BASE
         sorted_subs = sorted(user.subscriptions, key=lambda x: 1 if x.plan_type == SubscriptionType.PREMIUM else 2)
         
         for sub in sorted_subs:
@@ -158,7 +153,7 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                 
             expires_str = sub.expires_at.strftime("%d.%m.%Y %H:%M")
             
-            # ВАРИАНТ А: Подписка заморожена в очереди (is_pending == True)
+            # 1. Если тариф заморожен в очереди
             if sub.is_pending:
                 saved_days = (sub.expires_at - sub.created_at).days
                 if saved_days <= 0: saved_days = 30
@@ -167,47 +162,58 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                     prem_end_str = premium_sub.expires_at.strftime("%d.%m.%Y %H:%M")
                     profile_text += (
                         f"\n⏳ <b>Тариф: {sub.plan_type.upper()} (В очереди: {saved_days} дней)</b>\n"
-                        f"└ 💤 <i>Запустится автоматически <code>{prem_end_str}</code> сразу после окончания тарифа PREMIUM.</i>\n"
+                        f"└ 💤 <i>Запустится автоматически <code>{prem_end_str}</code>.</i>\n"
                     )
-                # Ключи внутри замороженного блока НЕ выводим, чтобы не путать людей!
                 continue
                 
-            # ВАРИАНТ Б: Подписка активна прямо сейчас (is_pending == False)
+            # 2. Если тариф активен прямо сейчас
             if sub.expires_at <= now: 
                 continue
                 
             profile_text += f"\nТариф: <b>{sub.plan_type.upper()}</b> (До: <code>{expires_str}</code>)\n"
             
-            # Выводим ВСЕ ключи сети внутри этого главного активного тарифа!
+            # --- РАСЧЕТ ЖИВОГО ТРАФИКА С ПАНЕЛИ ПО API ---
+            traffic_text = "📊 Трафик: <i>⌛ Загружаем счетчики...</i>\n"
+            if all_user_keys:
+                # Берем первый доступный ключ, чтобы считать данные с живой ноды
+                target_key = all_user_keys[0]
+                if target_key.server:
+                    xui = XUIMultiClient(api_url=target_key.server.api_url, api_token=target_key.server.api_token)
+                    stats = await xui.get_client_traffic(target_key.client_email)
+                    
+                    if stats:
+                        # Извлекаем байты (up + down)
+                        bytes_used = stats.get("up", 0) + stats.get("down", 0)
+                        
+                        # Переводим байты в Гигабайты с округлением до 1 знака
+                        gb_used = round(bytes_used / (1024 * 1024 * 1024), 1)
+                        gb_limit = 300 if sub.plan_type == SubscriptionType.PREMIUM else 150
+                        
+                        # Высчитываем остаток
+                        gb_left = max(0.0, round(gb_limit - gb_used, 1))
+                        
+                        # Рисуем красивую визуальную прогресс-полосу из 10 делений
+                        used_segments = min(10, int(gb_used / (gb_limit / 10)))
+                        bar = "🟩" * used_segments + "⬜" * (10 - used_segments)
+                        
+                        traffic_text = f"📊 Трафик: <b>{gb_used} ГБ</b> из <b>{gb_limit} ГБ</b>\n└ Осталось: <b>{gb_left} ГБ</b>\n└ Контур: <code>{bar}</code>\n"
+            
+            profile_text += traffic_text
+            
+            # Выводим ссылки серверов сети
             if not all_user_keys:
-                profile_text += "<i>⌛ Нарезаем доступ на серверах, обновите профиль через минуту...</i>\n"
+                profile_text += "<i>⌛ Нарезаем доступ на серверах...</i>\n"
             else:
                 for key in all_user_keys:
-
                     if key.server:
                         srv = key.server
-                        
-                        # Извлекаем чистый хост (домен или IP)
+                        protocol = "http" if srv.api_url.startswith("http") and "myepicpanel" not in srv.api_url else "https"
                         from urllib.parse import urlparse
                         parsed_url = urlparse(srv.api_url)
                         clean_domain = parsed_url.hostname
-                        
-                        # Проверка регулярным выражением: является ли хост IP-адресом
-                        import re
-                        is_ip = clean_domain and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", clean_domain)
-                        
-                        # ИСПРАВЛЕНО: Если хост — чистый IP-адрес, принудительно ставим http://
-                        if is_ip:
-                            protocol = "http"
-                        else:
-                            # Для буквенных доменов берем протокол из api_url панели
-                            protocol = "https" if srv.api_url.startswith("https") else "http"
-                        
-                        # Собираем чистую рабочую ссылку под клиентские приложения
                         dynamic_url = f"{protocol}://{clean_domain}:{srv.sub_port}/{srv.sub_path}/{key.sub_id}"
                     else:
                         dynamic_url = "Ошибка: Сервер удален"
-
                         
                     server_name = key.server.name if key.server else "Сервер"
                     profile_text += f"├ 🌍 <b>{server_name}:</b> <code>{dynamic_url}</code>\n"
@@ -218,6 +224,7 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
         await callback.message.edit_text(text=profile_text, reply_markup=get_profile_keyboard())
     except Exception:
         pass
+
 
 @user_router.callback_query(F.data == "back_to_main")
 async def cb_back_to_main(callback: CallbackQuery):
