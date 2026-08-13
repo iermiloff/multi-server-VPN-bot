@@ -110,9 +110,10 @@ async def cb_check_sub_again(callback: CallbackQuery, db_session: AsyncSession, 
     else:
         await callback.answer("❌ Вы всё еще не подписались на канал техподдержки!", show_alert=True)
 
+# handlers/user.py — ОБНОВЛЕННЫЙ ВЫВОД ПРОФИЛЯ С ИНТЕРФЕЙСОМ ОЧЕРЕДИ
+
 @user_router.callback_query(F.data == "menu_profile")
 async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
-    """Вывод личного кабинета пользователя со ссылками на все активные ноды"""
     await callback.answer()
     now = datetime.datetime.utcnow()
     
@@ -132,18 +133,42 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
         await callback.message.edit_text("❌ Ошибка профиля. Перезапустите бота через /start")
         return
         
-    active_subs = [s for s in user.subscriptions if s.is_active and s.expires_at > now]
-    profile_text = f"👤 <b>Личный кабинет</b>\n\n• Твой Telegram ID: <code>{user.telegram_id}</code>\n"
+    # Ищем, активен ли у пользователя PREMIUM прямо сейчас
+    premium_sub = next((s for s in user.subscriptions if s.plan_type == SubscriptionType.PREMIUM and s.is_active and not s.is_pending and s.expires_at > now), None)
     
-    if not active_subs:
-        profile_text += (
-            "• Статус подписки: ❌ <b>Не активна</b>\n\n"
-            "У вас пока нет активных подключений. Купите доступ или "
-            "активируйте бонус от партнеров в главном меню."
-        )
+    profile_text = f"👤 <b>Личный кабинет</b>\n\n• Твой Telegram ID: <code>{user.telegram_id}</code>\n"
+    active_exists = any(s.is_active and s.expires_at > now for s in user.subscriptions)
+    
+    if not active_exists:
+        profile_text += "• Статус подписки: ❌ <b>Не активна</b>\n\nУ вас пока нет активных подключений."
     else:
-        profile_text += "• Статус подписки: ✅ <b>Активна</b>\n\n🔗 <b>Ваши ссылки подписки:</b>\n"
-        for sub in active_subs:
+        profile_text += "• Статус подписки: ✅ <b>Активна</b>\n\n🔗 <b>Ваши доступы и ссылки подписки:</b>\n"
+        
+        # Сортируем подписки: сначала PREMIUM, потом BASE
+        sorted_subs = sorted(user.subscriptions, key=lambda x: 1 if x.plan_type == SubscriptionType.PREMIUM else 2)
+        
+        for sub in sorted_subs:
+            if not sub.is_active:
+                continue
+                
+            # Если подписка заморожена в очереди (is_pending == True)
+            if sub.is_pending:
+                # Рассчитываем длительность замороженных дней
+                saved_days = (sub.expires_at - sub.created_at).days
+                if saved_days <= 0: saved_days = 30
+                
+                if premium_sub:
+                    prem_end_str = premium_sub.expires_at.strftime("%d.%m.%Y %H:%M")
+                    profile_text += (
+                        f"\n⏳ <b>Тариф: {sub.plan_type.upper()} (В очереди: {saved_days} дней)</b>\n"
+                        f"└ 💤 <i>Запустится автоматически <code>{prem_end_str}</code> сразу после окончания тарифа PREMIUM.</i>\n"
+                    )
+                continue
+                
+            # Если подписка активна прямо сейчас (is_pending == False)
+            if sub.expires_at <= now:
+                continue
+                
             expires_str = sub.expires_at.strftime("%d.%m.%Y %H:%M")
             profile_text += f"\nТариф: <b>{sub.plan_type.upper()}</b> (До: <code>{expires_str}</code>)\n"
             
@@ -151,14 +176,11 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                 profile_text += "<i>⌛ Нарезаем доступ на серверах, обновите профиль через минуту...</i>\n"
             else:
                 for key in sub.keys:
-                    # ИСПРАВЛЕНО: Собираем ссылку динамически прямо из актуальных параметров ноды!
                     if key.server:
                         srv = key.server
                         protocol = "https" if srv.api_url.startswith("https") else "http"
                         raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
-                        clean_host = raw_host.split(":")[0]
-                        
-                        # Ссылка всегда актуальна, даже если админ изменил sub_path или порт секунду назад
+                        clean_host = raw_host.split(":")
                         dynamic_url = f"{protocol}://{clean_host}:{srv.sub_port}/{srv.sub_path}/{key.sub_id}"
                     else:
                         dynamic_url = "Ошибка: Сервер удален"
@@ -172,6 +194,7 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
         await callback.message.edit_text(text=profile_text, reply_markup=get_profile_keyboard())
     except Exception:
         pass
+
 
 @user_router.callback_query(F.data == "back_to_main")
 async def cb_back_to_main(callback: CallbackQuery):
