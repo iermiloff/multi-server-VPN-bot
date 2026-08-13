@@ -303,13 +303,12 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                     db_session.add(key_record)
                     nodes_synced += 1
             else:
-                # ИСПРАВЛЕНО: Ключ на Main-1 ОСТАЕТСЯ привязанным к базовой подписке в СУБД бота!
+                # ОСТАВЛЯЕМ КЛЮЧ В БД КАК ЕСТЬ (БЕЗ ПЕРЕПРИВЯЗОК ID)
                 current_key = existing_keys[srv.id]
                 
-                # ИСПРАВЛЕНО: Передаем в Мульти-API в строку пути ИМЕННО ТЕКУЩИЙ UUID КЛИЕНТА (current_key.sub_id),
-                # который уже заведен на этой панели, чтобы панель успешно применила новые 60 дней и порты PREMIUM!
-                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=days)
-                await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
+                # По API на панели 3x-ui принудительно накатываем новые порты PREMIUM и выставляем 60 дней!
+                await srv_client.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expires_days=days)
+                await srv_client.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
                 nodes_synced += 1
 
     await db_session.commit()
