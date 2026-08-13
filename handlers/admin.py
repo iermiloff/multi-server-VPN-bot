@@ -329,6 +329,7 @@ async def msg_srv_sub_path(message: Message, state: FSMContext, db_session: Asyn
     t, km = await cb_adm_servers_list(None, db_session)
     await message.answer(text=f"✅ <b>Сервер сохранен!</b>\n\n{t}", reply_markup=km)
 
+
 @admin_router.callback_query(F.data.startswith("adm_srv_manage_"))
 async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     """Кабинет управления нодой с кнопкой 1-click синхронизации и цветными маркерами"""
@@ -361,12 +362,10 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
     for ib in all_inbounds:
         ib_id = int(ib.get("id"))
         current_plan = db_inbounds.get(ib_id, "❌ОТКЛЮЧЕН")
-        # ВОЗВРАЩЕНО: Сочные маркеры активности тарифов для главного экрана сервера
         badge = "🟢 BASE" if current_plan == "base" else "🔴 PREMIUM" if current_plan == "premium" else "⚫ НЕАКТИВЕН"
         kb.append([InlineKeyboardButton(text=f"[{ib_id}] {ib.get('protocol','').upper()} ({ib.get('remark','')}) -> {badge}", callback_data=f"adm_toggle_ib_{srv.id}_{ib_id}")])
         
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
-    
     try: await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     except Exception: pass
 
@@ -386,7 +385,7 @@ async def cb_adm_srv_sync_users(callback: CallbackQuery, db_session: AsyncSessio
     if not base_inbound_ids and not premium_inbound_ids:
         await callback.message.answer("⚠️ Сначала настройте тарифы портов xray ниже!", show_alert=True); return
         
-    await callback.message.edit_text(f"⏳ <b>Массовая синхронизация...</b>\n Накатываем базу на <code>{srv.name}</code>.")
+    await callback.message.edit_text(f"⏳ <b>Массовая синхронизация...</b>\nНакатываем базу на ноду <code>{srv.name}</code>.")
     active_subs = (await db_session.execute(select(Subscription).where(Subscription.is_active == True, Subscription.is_pending == False, Subscription.expires_at > now).options(selectinload(Subscription.keys)))).scalars().all()
     
     synced_count = 0
@@ -395,16 +394,23 @@ async def cb_adm_srv_sync_users(callback: CallbackQuery, db_session: AsyncSessio
     for sub in active_subs:
         try:
             existing_key = sub.keys[0] if (sub.keys and len(sub.keys) > 0) else None
-            
             email = existing_key.client_email if existing_key else f"usr_{sub.user_id}_{uuid.uuid4().hex[:4]}"
             sub_id = existing_key.sub_id if existing_key else uuid.uuid4().hex
             
-            if next((k for k in sub.keys if k.server_id == server_id), None): 
-                continue
-
+            if next((k for k in sub.keys if k.server_id == server_id), None): continue
+            target_inbounds = (base_inbound_ids + premium_inbound_ids) if sub.plan_type == SubscriptionType.PREMIUM else base_inbound_ids
+            if not target_inbounds: continue
+            
+            days_left = max(1, (sub.expires_at - now).days)
+            if await xui.add_client(email=email, sub_id=sub_id, inbound_ids=target_inbounds, expires_days=days_left, plan_type=sub.plan_type):
+                db_session.add(VPNKey(subscription_id=sub.id, server_id=server_id, client_email=email, sub_id=sub_id, config_data=sub_id))
+                synced_count += 1
+        except Exception as push_err:
+            logger.error(f"🚨 Ошибка наката реферала {sub.user_id}: {push_err}")
+            continue
             
     await db_session.commit()
-    await callback.message.answer(text=f"✅ <b>Синхронизация завершена!</b>\n На ноду <code>{srv.name}</code> добавлено <b>{synced_count} активных клиентов</b>.")
+    await callback.message.answer(text=f"✅ <b>Синхронизация завершена!</b>\nНа ноду <code>{srv.name}</code> добавлено <b>{synced_count} активных клиентов</b>.")
     await cb_adm_srv_manage(callback, db_session)
 
 @admin_router.callback_query(F.data.startswith("adm_crm_toggle_pro_"))
@@ -414,6 +420,7 @@ async def cb_adm_crm_toggle_pro(callback: CallbackQuery, db_session: AsyncSessio
     user.is_pro_ref = not user.is_pro_ref; await db_session.commit()
     await callback.answer(f"Статус изменен!", show_alert=True)
     await render_user_card(callback.message, db_session, target_id, is_callback=True)
+
 
 @admin_router.callback_query(F.data == "adm_ref_payouts_list")
 async def cb_adm_ref_payouts_list(callback: CallbackQuery, db_session: AsyncSession):
@@ -431,8 +438,10 @@ async def cb_adm_ref_payouts_list(callback: CallbackQuery, db_session: AsyncSess
         text += f"📊 <b>Итого к выплате по сети:</b> <code>${total:.2f}</code>"
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Меню", callback_data="adm_main_menu")]]))
 
+
 @admin_router.callback_query(F.data.startswith("adm_toggle_ib_"))
 async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
+    """Мгновенное переключение тарифов инбаундов Xray с автообновлением экрана в реальном эфире"""
     raw_data = callback.data.replace("adm_toggle_ib_", "")
     parts = raw_data.split("_", 1)
     server_id = int(parts[0])
@@ -442,15 +451,10 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
     xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
     all_inbounds = await xui.get_inbounds()
     target_ib = next((i for i in all_inbounds if i.get("id") == ib_id), None)
-    
     ib_record = (await db_session.execute(select(TariffInbound).where(TariffInbound.server_id == server_id, TariffInbound.inbound_id == ib_id))).scalar_one_or_none()
     
     if not ib_record:
-        db_session.add(TariffInbound(
-            server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=ib_id, 
-            protocol_name=target_ib.get("protocol", "unknown"), port=target_ib.get("port", 0), 
-            remark=target_ib.get("remark", "")
-        ))
+        db_session.add(TariffInbound(server_id=server_id, plan_type=SubscriptionType.BASE, inbound_id=ib_id, protocol_name=target_ib.get("protocol", "unknown"), port=target_ib.get("port", 0), remark=target_ib.get("remark", "")))
         await callback.answer("🟩 Переведено в тариф BASE")
     elif ib_record.plan_type == SubscriptionType.BASE:
         ib_record.plan_type = SubscriptionType.PREMIUM
@@ -460,8 +464,7 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
         await callback.answer("⚫ Инбаунд деактивирован")
         
     await db_session.commit()
-
-    db_inbounds_new = {i.inbound_id: i.plan_type for i in (await db_session.execute(select(TariffInbound).where(TariffInbound.server_id == srv.id))).scalars().all()}
+    db_inbounds_new = {i.inbound_id: i.plan_type for i in (await db_session.execute(select(TariffInbound).where(TariffInbound.server_id == server_id))).scalars().all()}
     text = f"🖥 <b>Управление нодой: {srv.name}</b>\n└ URL: <code>{srv.api_url}</code>\n\n⚙️ <b>Настройка тарифов портов Xray:</b>"
     
     kb = [
@@ -476,33 +479,32 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
         kb.append([InlineKeyboardButton(text=f"[{current_ib_id}] {ib.get('protocol','').upper()} ({ib.get('remark','')}) -> {badge}", callback_data=f"adm_toggle_ib_{srv.id}_{current_ib_id}")])
         
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
-    
     try: await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     except Exception: pass
 
+
 @admin_router.callback_query(F.data == "adm_partners_list")
 async def cb_adm_partners_list(callback: CallbackQuery, db_session: AsyncSession):
-    """Вывод списка каналов и спонсоров"""
     if callback: await callback.answer()
     channels = (await db_session.execute(select(PartnerChannel))).scalars().all()
     text = "📢 <b>Управление каналами и подписками:</b>\n\n"
     kb = []
-    if not channels: 
-        text += "<i>Список каналов пока пуст.</i>"
+    if not channels: text += "<i>Список каналов пока пуст.</i>"
     else:
         for ch in channels:
             role = " Саппорт" if ch.is_required else " Спонсор"
             text += f"• <b>{ch.channel_name}</b> [{role}]\nID: <code>{ch.channel_id}</code>\n\n"
             kb.append([InlineKeyboardButton(text=f"❌ Удалить {ch.channel_name}", callback_data=f"adm_part_del_{ch.id}")])
-            
     kb.append([InlineKeyboardButton(text="➕ Добавить канал", callback_data="adm_part_add_start"), InlineKeyboardButton(text=" Меню", callback_data="adm_main_menu")])
     if callback: await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     return text, InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 @admin_router.callback_query(F.data == "adm_part_add_start")
 async def cb_adm_part_add_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer(); await state.set_state(AdminPartnerStates.wait_for_id)
     await callback.message.edit_text("<b>Шаг 1/4:</b> Введите цифровой <b>Telegram ID канала</b>:")
+
 
 @admin_router.message(AdminPartnerStates.wait_for_id)
 async def msg_part_id(message: Message, state: FSMContext, db_session: AsyncSession):
@@ -512,11 +514,13 @@ async def msg_part_id(message: Message, state: FSMContext, db_session: AsyncSess
     await state.update_data(channel_id=ch_id); await state.set_state(AdminPartnerStates.wait_for_name)
     await message.answer("<b>Шаг 2/4:</b> Введите название канала:")
 
+
 @admin_router.message(AdminPartnerStates.wait_for_name)
 async def msg_part_name(message: Message, state: FSMContext, db_session: AsyncSession):
     if message.text.startswith("/"): await state.clear(); await cmd_admin(message, db_session); return
     await state.update_data(channel_name=message.text.strip()); await state.set_state(AdminPartnerStates.wait_for_link)
     await message.answer("<b>Шаг 3/4:</b> Введите ссылку-приглашение:")
+
 
 @admin_router.message(AdminPartnerStates.wait_for_link)
 async def msg_part_link(message: Message, state: FSMContext, db_session: AsyncSession):
@@ -525,6 +529,7 @@ async def msg_part_link(message: Message, state: FSMContext, db_session: AsyncSe
     kb = [[InlineKeyboardButton(text=" Спонсор", callback_data="role_sponsor"), InlineKeyboardButton(text=" Саппорт", callback_data="role_support")]]
     await message.answer("<b>Шаг 4/4:</b> Выберите назначение канала:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
+
 @admin_router.callback_query(AdminPartnerStates.wait_for_type, F.data.startswith("role_"))
 async def cb_part_finalize(callback: CallbackQuery, state: FSMContext, db_session: AsyncSession):
     await callback.answer(); is_required = (callback.data == "role_support")
@@ -532,6 +537,7 @@ async def cb_part_finalize(callback: CallbackQuery, state: FSMContext, db_sessio
     db_session.add(PartnerChannel(channel_id=data["channel_id"], channel_name=data["channel_name"], invite_link=data["invite_link"], is_required=is_required))
     await db_session.commit()
     await cb_adm_partners_list(callback, db_session)
+
 
 @admin_router.callback_query(F.data.startswith("adm_part_del_"))
 async def cb_part_del(callback: CallbackQuery, db_session: AsyncSession):
