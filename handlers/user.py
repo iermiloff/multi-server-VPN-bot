@@ -111,6 +111,8 @@ async def cb_check_sub_again(callback: CallbackQuery, db_session: AsyncSession, 
         await callback.answer("❌ Вы всё еще не подписались на канал техподдержки!", show_alert=True)
 
 
+# handlers/user.py — ПОЛНОСТЬЮ ДИНАМИЧЕСКИЙ ЛИЧНЫЙ КАБИНЕТ (ВСЕ КЛЮЧИ В АКТИВНОМ ТАРИФЕ)
+
 @user_router.callback_query(F.data == "menu_profile")
 async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
     await callback.answer()
@@ -141,7 +143,13 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
     else:
         profile_text += "• Статус подписки: ✅ <b>Активна</b>\n\n🔗 <b>Ваши доступы и ссылки подписки:</b>\n"
         
-        # Сортируем: сначала выводим PREMIUM, потом BASE
+        # Собираем абсолютно ВСЕ ключи пользователя изо всех его подписок в один массив
+        all_user_keys = []
+        for s in user.subscriptions:
+            for k in s.keys:
+                all_user_keys.append(k)
+                
+        # Сортируем подписки для вывода: сначала PREMIUM, потом BASE
         sorted_subs = sorted(user.subscriptions, key=lambda x: 1 if x.plan_type == SubscriptionType.PREMIUM else 2)
         
         for sub in sorted_subs:
@@ -150,7 +158,7 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                 
             expires_str = sub.expires_at.strftime("%d.%m.%Y %H:%M")
             
-            # ЕСЛИ ТАРИФ В ОЧЕРЕДИ (is_pending == True)
+            # ВАРИАНТ А: Подписка заморожена в очереди (is_pending == True)
             if sub.is_pending:
                 saved_days = (sub.expires_at - sub.created_at).days
                 if saved_days <= 0: saved_days = 30
@@ -161,26 +169,28 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                         f"\n⏳ <b>Тариф: {sub.plan_type.upper()} (В очереди: {saved_days} дней)</b>\n"
                         f"└ 💤 <i>Запустится автоматически <code>{prem_end_str}</code> сразу после окончания тарифа PREMIUM.</i>\n"
                     )
-            # ЕСЛИ ТАРИФ АКТИВЕН ПРЯМО СЕЙЧАС
-            else:
-                if sub.expires_at <= now: continue
-                profile_text += f"\nТариф: <b>{sub.plan_type.upper()}</b> (До: <code>{expires_str}</code>)\n"
+                # Ключи внутри замороженного блока НЕ выводим, чтобы не путать людей!
+                continue
+                
+            # ВАРИАНТ Б: Подписка активна прямо сейчас (is_pending == False)
+            if sub.expires_at <= now: 
+                continue
+                
+            profile_text += f"\nТариф: <b>{sub.plan_type.upper()}</b> (До: <code>{expires_str}</code>)\n"
             
-            # Выводим ключи для подписки в любом статусе (и активных, и замороженных в очереди!)
-            if not sub.keys:
+            # Выводим ВСЕ ключи сети внутри этого главного активного тарифа!
+            if not all_user_keys:
                 profile_text += "<i>⌛ Нарезаем доступ на серверах, обновите профиль через минуту...</i>\n"
             else:
-                for key in sub.keys:
+                for key in all_user_keys:
                     if key.server:
                         srv = key.server
                         protocol = "https" if srv.api_url.startswith("https") else "http"
                         
-                        # ИСПРАВЛЕНО: Забираем только чистый IP/Домен БЕЗ ПОРТА панели
                         from urllib.parse import urlparse
                         parsed_url = urlparse(srv.api_url)
-                        clean_domain = parsed_url.hostname  # Вернет строго "myepicpanel.ru" или "188.120.234.166"
+                        clean_domain = parsed_url.hostname  # Строго "myepicpanel.ru" или IP
                         
-                        # ИСПРАВЛЕНО: Жестко подставляем порт подписки (srv.sub_port) вместо порта панели!
                         dynamic_url = f"{protocol}://{clean_domain}:{srv.sub_port}/{srv.sub_path}/{key.sub_id}"
                     else:
                         dynamic_url = "Ошибка: Сервер удален"
@@ -194,8 +204,6 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
         await callback.message.edit_text(text=profile_text, reply_markup=get_profile_keyboard())
     except Exception:
         pass
-
-
 
 @user_router.callback_query(F.data == "back_to_main")
 async def cb_back_to_main(callback: CallbackQuery):
