@@ -438,26 +438,35 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
     existing_keys = {k.server_id: k for k in (await db_session.execute(select(VPNKey).join(Subscription).where(Subscription.user_id == user_id))).scalars().all()}
     expiry_timestamp = int(active_sub_obj.expires_at.timestamp() * 1000)
     
+
     for srv in servers:
-        ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_(["base", "premium"] if (plan_type == "premium" or not is_pending_status) else ["base"]))
-        inbound_ids = [ib.inbound_id for ib in (await db_session.execute(ib_stmt)).scalars().all()]
-        if not inbound_ids: continue
-        xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
+        try:
+            ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_(["base", "premium"] if (plan_type == "premium" or not is_pending_status) else ["base"]))
+            inbound_ids = [ib.inbound_id for ib in (await db_session.execute(ib_stmt)).scalars().all()]
+            if not inbound_ids: 
+                continue
+                
+            xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
+            
+            if srv.id not in existing_keys:
+                email = f"usr_{user_id}_{uuid.uuid4().hex[:4]}"
+                sub_id = uuid.uuid4().hex
+                if await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days, plan_type=plan_type):
+                    db_session.add(VPNKey(subscription_id=active_sub_obj.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=sub_id))
+            else:
+                current_key = existing_keys[srv.id]
+                target_bytes = (300 if plan_type == "premium" else 150) * 1024 * 1024 * 1024
+                await xui.attach_client_inbounds(email=current_key.client_email, inbound_ids=inbound_ids)
+                res_get = await xui._request("GET", f"panel/api/clients/get/{current_key.client_email}")
+                if res_get and res_get.get("success") and res_get.get("obj"):
+                    p_data = res_get.get("obj")
+                    await xui._request("POST", f"panel/api/clients/update/{current_key.client_email}", json_data={"id": p_data.get("id"), "email": current_key.client_email, "totalGB": target_bytes, "expiryTime": expiry_timestamp, "subId": p_data.get("subId"), "limitIp": 3, "enable": True})
+                    await xui._request("POST", f"panel/api/clients/resetTraffic/{current_key.client_email}")
         
-        if srv.id not in existing_keys:
-            email = f"usr_{user_id}_{uuid.uuid4().hex[:4]}"
-            sub_id = uuid.uuid4().hex
-            if await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days, plan_type=plan_type):
-                db_session.add(VPNKey(subscription_id=active_sub_obj.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=sub_id))
-        else:
-            current_key = existing_keys[srv.id]
-            target_bytes = (300 if plan_type == "premium" else 150) * 1024 * 1024 * 1024
-            await xui.attach_client_inbounds(email=current_key.client_email, inbound_ids=inbound_ids)
-            res_get = await xui._request("GET", f"panel/api/clients/get/{current_key.client_email}")
-            if res_get and res_get.get("success") and res_get.get("obj"):
-                p_data = res_get.get("obj")
-                await xui._request("POST", f"panel/api/clients/update/{current_key.client_email}", json_data={"id": p_data.get("id"), "email": current_key.client_email, "totalGB": target_bytes, "expiryTime": expiry_timestamp, "subId": p_data.get("subId"), "limitIp": 3, "enable": True})
-                await xui._request("POST", f"panel/api/clients/resetTraffic/{current_key.client_email}")
+        except Exception as node_error:
+            logger.error(f"🚨 Ошибка связи с сервером {srv.name} при оплате: {node_error}")
+            continue
+
 
     await db_session.commit()
     success_text = f"🎉 <b>Подписка успешно начислена!</b>\n\n• <b>Активирован тариф:</b> <code>{plan_type.upper()}</code>\n• <b>Добавлено времени:</b> <b>+{days} дней</b>\n• <b>Трафик:</b> <code>{300 if plan_type == 'premium' else 150} ГБ</code>\n\n💬 <i>Статус: {msg_alert} Все изменения сохранены. Нажмите кнопку ниже для перехода в меню.</i>"
