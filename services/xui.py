@@ -121,30 +121,25 @@ class XUIMultiClient:
 
 # services/xui.py — ИСПРАВЛЕННЫЙ МЕТОД ОБНОВЛЕНИЯ МУЛЬТИ-КЛИЕНТА
 
-    async def update_client_inbounds(self, email: str, sub_id: str, inbound_ids: List[int], expiry_time: int) -> bool:
-        """Перенарезает список инбаундов и выставляет точное время для существующего мульти-клиента"""
+    async def attach_client_inbounds(self, email: str, inbound_ids: List[int]) -> bool:
+        """Официальный метод привязки существующего клиента к новым инбаундам (стр. 9)"""
         payload = {
-            "id": sub_id,
-            "email": email,
-            "limitIp": 0,
-            "totalGB": 0,
-            "expiryTime": expiry_time, # Чистый таймштамп 60 дней премиума
-            "enable": True,
-            "subId": sub_id,
-            "inboundIds": inbound_ids
+            "inboundIds": inbound_ids  # Массив портов, которые нужно ДОБАВИТЬ клиенту
         }
-        
-        path = f"panel/api/clients/update/{sub_id}"
+        path = f"panel/api/clients/{email}/attach"
         res = await self._request("POST", path, json_data=payload)
         return res is not None and res.get("success", False)
 
-    async def adjust_client_days(self, emails: List[str], add_days: int) -> bool:
-        """Сдвигает срок действия подписки (в днях) для списка email без удаления из инбаундов"""
+    async def update_client_expiry(self, email: str, expiry_time: int) -> bool:
+        """Обновление строки клиента строго по схеме со скриншота документации"""
+        # Формируем тело запроса в точности как на скриншоте API
         payload = {
-            "emails": emails,    # Список email пользователей (передаем массивом)
-            "addDays": add_days,  # Количество дней сдвига (может быть положительным или отрицательным)
-            "addBytes": 0
+            "email": email,
+            "totalGB": 0,
+            "expiryTime": expiry_time, # Чистый таймштамп 60 дней премиума
+            "tgId": "",
+            "enable": True
         }
-        path = "panel/api/clients/bulkAdjust"
+        path = f"panel/api/clients/update/{email}"
         res = await self._request("POST", path, json_data=payload)
         return res is not None and res.get("success", False)
