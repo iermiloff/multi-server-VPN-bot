@@ -813,3 +813,89 @@ async def cb_adm_ref_payouts_list(callback: CallbackQuery, db_session: AsyncSess
     kb = [[InlineKeyboardButton(text="◀️ В меню админа", callback_data="adm_main_menu")]]
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
+# handlers/admin.py — В САМЫЙ КОНЕЦ ФАЙЛА (МАССОВЫЙ НАКАТ ПОЛЬЗОВАТЕЛЕЙ)
+
+@admin_router.callback_query(F.data.startswith("adm_srv_sync_users_"))
+async def cb_adm_srv_sync_users(callback: CallbackQuery, db_session: AsyncSession):
+    """Массовый накат всех действующих клиентов бота на новую ноду 3x-ui в 1 клик"""
+    await callback.answer()
+    server_id = int(callback.data.split("_")[-1])
+    now = datetime.datetime.utcnow()
+    
+    # 1. Загружаем целевой сервер
+    srv = (await db_session.execute(select(Server).where(Server.id == server_id))).scalar_one_or_none()
+    if not srv:
+        await callback.message.answer("❌ Сервер не найден."); return
+        
+    # 2. Собираем инбаунды, которые админ закрепил за этим сервером в СУБД
+    ib_res = await db_session.execute(select(TariffInbound).where(TariffInbound.server_id == server_id))
+    db_inbounds = ib_res.scalars().all()
+    
+    base_inbound_ids = [ib.inbound_id for ib in db_inbounds if ib.plan_type == "base"]
+    premium_inbound_ids = [ib.inbound_id for ib in db_inbounds if ib.plan_type == "premium"]
+    
+    if not base_inbound_ids and not premium_inbound_ids:
+        await callback.message.answer("⚠️ Ошибка: Сначала привяжите инбаунды к портам xray в меню этого сервера ниже!", show_alert=True)
+        return
+        
+    await callback.message.edit_text(f"⏳ <b>Запущена массовая синхронизация...</b>\n\nБот накатывает базу клиентов на сервер <code>{srv.name}</code>. Пожалуйста, подождите.")
+    
+    # 3. Вытаскиваем абсолютно ВСЕХ пользователей с активными подписками
+    stmt_subs = select(Subscription).where(
+        Subscription.is_active == True,
+        Subscription.is_pending == False,
+        Subscription.expires_at > now
+    ).options(selectinload(Subscription.keys))
+    
+    active_subs = (await db_session.execute(stmt_subs)).scalars().all()
+    synced_count = 0
+    
+    xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
+    
+    for sub in active_subs:
+        # Ищем, создавался ли для этого юзера хоть один vpn-ключ (чтобы забрать его email и sub_id)
+        # Если ключей еще не было вообще ни на одном сервере, сгенерируем новые
+        existing_key = sub.keys[0] if sub.keys else None
+        
+        email = existing_key.client_email if existing_key else f"usr_{sub.user_id}_{uuid.uuid4().hex[:4]}"
+        sub_id = existing_key.sub_id if existing_key else uuid.uuid4().hex
+        
+        # Проверяем, нет ли уже ключа конкретно для ЭТОГО сервера (защита от дублирования)
+        key_check = next((k for k in sub.keys if k.server_id == server_id), None)
+        if key_check: continue # Пропускаем, если юзер уже заведен на этой ноде
+        
+        # Формируем пул портов для этого пользователя на новом сервере
+        if sub.plan_type == SubscriptionType.PREMIUM:
+            # Премиуму доступны и базовые, и премиумные инбаунды ноды
+            target_inbounds = base_inbound_ids + premium_inbound_ids
+            gb_limit = 300
+        else:
+            # Базовому тарифу — только базовые порты ноды
+            target_inbounds = base_inbound_ids
+            gb_limit = 150
+            
+        if not target_inbounds: continue
+        
+        # Рассчитываем остаток дней подписки для панели
+        days_left = max(1, (sub.expires_at - now).days)
+        
+        # Пушим мульти-клиента на новую панель 3x-ui по официальному API
+        success = await xui.add_client(
+            email=email, sub_id=sub_id, 
+            inbound_ids=target_inbounds, 
+            expires_days=days_left, plan_type=sub.plan_type
+        )
+        
+        if success:
+            # Записываем vpn_key в СУБД бота, привязав к этой ноде
+            db_session.add(VPNKey(
+                subscription_id=sub.id, server_id=server_id,
+                client_email=email, sub_id=sub_id, config_data=sub_id
+            ))
+            synced_count += 1
+            
+    await db_session.commit()
+    
+    # Возвращаем админа на экран сервера с отчетом о победе
+    await callback.message.answer(text=f"✅ <b>Синхронизация сервера завершена!</b>\n\n• На ноду <code>{srv.name}</code> успешно добавлено: <b>{synced_count} активных клиентов</b>.")
+    await cb_adm_srv_manage(callback, db_session)
