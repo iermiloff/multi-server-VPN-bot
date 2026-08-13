@@ -151,8 +151,20 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                 profile_text += "<i>⌛ Нарезаем доступ на серверах, обновите профиль через минуту...</i>\n"
             else:
                 for key in sub.keys:
+                    # ИСПРАВЛЕНО: Собираем ссылку динамически прямо из актуальных параметров ноды!
+                    if key.server:
+                        srv = key.server
+                        protocol = "https" if srv.api_url.startswith("https") else "http"
+                        raw_host = srv.api_url.strip("/").replace("https://", "").replace("http://", "")
+                        clean_host = raw_host.split(":")[0]
+                        
+                        # Ссылка всегда актуальна, даже если админ изменил sub_path или порт секунду назад
+                        dynamic_url = f"{protocol}://{clean_host}:{srv.sub_port}/{srv.sub_path}/{key.sub_id}"
+                    else:
+                        dynamic_url = "Ошибка: Сервер удален"
+                        
                     server_name = key.server.name if key.server else "Сервер"
-                    profile_text += f"├ 🌍 <b>{server_name}:</b> <code>{key.config_data}</code>\n"
+                    profile_text += f"├ 🌍 <b>{server_name}:</b> <code>{dynamic_url}</code>\n"
                     
         profile_text += "\n💡 <i>Нажмите на код ссылки выше, чтобы скопировать её.</i>"
         
