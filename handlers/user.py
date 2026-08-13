@@ -493,3 +493,185 @@ async def provision_multiserver_subscription(callback: CallbackQuery, db_session
         await callback.message.answer(
             text="❌ Произошла техническая ошибка на стороне ноды. Пожалуйста, обратитесь в поддержку."
         )
+
+# handlers/user.py — В САМЫЙ КОНЕЦ ФАЙЛА. ХЕНДЛЕР ПРОВЕРКИ СЧЕТА И НАЧИСЛЕНИЯ С ПАРТНЕРКОЙ
+
+@user_router.callback_query(F.data.startswith("check_invoice_"))
+async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSession):
+    """Ручная проверка статуса инвойса в CryptoBot по кнопке пользователя"""
+    invoice_id = int(callback.data.split("_")[-1])
+    user_id = callback.from_user.id
+    
+    # 1. ЗАЩИТА ОТ DOUBLE SPEND: Проверяем, не начисляли ли мы уже за этот инвойс ранее
+    from database.models import PaymentLog, Subscription, User, VPNKey, Server, TariffInbound
+    from sqlalchemy import select
+    
+    log_check = await db_session.execute(select(PaymentLog).where(PaymentLog.invoice_id == invoice_id))
+    if log_check.scalar_one_or_none():
+        await callback.answer("✅ Эта покупка уже успешно зачислена на ваш аккаунт!", show_alert=True)
+        return
+
+    # 2. Запрашиваем живой статус инвойса напрямую с серверов CryptoBot API
+    status = await cryptobot_client.get_invoice_status(invoice_id)
+    
+    if not status:
+        await callback.answer("⚠️ Не удалось получить статус счета от CryptoBot. Попробуйте еще раз.", show_alert=True)
+        return
+        
+    if status == "active":
+        await callback.answer("⏳ Счет еще не оплачен! Оплатите инвойс в @CryptoBot и нажмите кнопку снова.", show_alert=True)
+        return
+        
+    if status == "expired":
+        await callback.message.edit_text("❌ Срок действия этого счета истек. Пожалуйста, создайте новый инвойс.")
+        return
+
+    # --- ЕСЛИ СТАТУС СТРОГО "paid" (УСПЕШНАЯ ОПЛАТА) ---
+    await callback.message.edit_text("⏳ <b>Платеж подтвержден!</b> Нарезаем доступы и рассчитываем партнерские награды...")
+    
+    # Восстанавливаем данные тарифа из текста сообщения или берем дефолты на основе цены счета
+    # Но надежнее — мы знаем, что у вас payload формируется как "user_id:plan_type:days"
+    # Для этого метода пуллинга мы запрашиваем детали инвойса (или парсим описание)
+    # Так как мы знаем структуру ваших кнопок покупки:
+    is_premium = "PREMIUM" in callback.message.text
+    plan_type = "premium" if is_premium else "base"
+    days = 180 if "180" in callback.message.text else 90 if "90" in callback.message.text else 30
+    
+    price = get_price(plan_type, days)
+    now = datetime.datetime.utcnow()
+
+    # 3. АКТИВАЦИЯ ТАРИФА В СУБД БОТА (НАША ЛИНЕЙНАЯ ОЧЕРЕДЬ ОЧЕРЕДЕЙ)
+    stmt_user = select(User).where(User.telegram_id == user_id).options(selectinload(User.subscriptions))
+    user_res = await db_session.execute(stmt_user)
+    user = user_res.scalar_one()
+
+    # Проверяем текущую активность тарифов для заморозки
+    base_active = any(s.plan_type == "base" and s.is_active and s.expires_at > now and not s.is_pending for s in user.subscriptions)
+    
+    target_sub = next((s for s in user.subscriptions if s.plan_type == plan_type), None)
+    is_pending_status = False
+    
+    # Применяем логику сценариев очередей, которую полировали всю ночь
+    if plan_type == "premium" and base_active:
+        for s in user.subscriptions:
+            if s.plan_type == "base": s.is_pending = True # Замораживаем базу
+        is_pending_status = False
+        msg_alert = f"🔥 Тариф PREMIUM на {days} дней успешно активирован! Твоя База временно убрана в очередь."
+    else:
+        is_pending_status = any(s.is_active and s.expires_at > now and not s.is_pending for s in user.subscriptions if s.plan_type != plan_type)
+        msg_alert = f"✅ Спасибо за оплату! Тариф {plan_type.upper()} продлен на {days} дней."
+
+    if target_sub:
+        if target_sub.is_active and target_sub.expires_at > now and not target_sub.is_pending:
+            target_sub.expires_at += datetime.timedelta(days=days)
+        else:
+            target_sub.expires_at = now + datetime.timedelta(days=days)
+            target_sub.is_pending = is_pending_status
+            target_sub.is_active = True
+        active_sub_obj = target_sub
+    else:
+        new_sub = Subscription(user_id=user_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days), is_pending=is_pending_status)
+        db_session.add(new_sub)
+        active_sub_obj = new_sub
+
+    await db_session.flush()
+
+    # --- 4. ДВУХЭТАЖНАЯ РЕФЕРАЛЬНАЯ СИСТЕМА (ПЕРВАЯ ПОКУПКА) ---
+    # Проверяем, совершал ли пользователь покупки до этого момента
+    stmt_logs_count = select(func.count(PaymentLog.id)).where(PaymentLog.user_id == user_id)
+    past_payments = await db_session.scalar(stmt_logs_count) or 0
+    
+    if past_payments == 0 and user.referred_by:
+        # Находим пригласителя в базе данных
+        stmt_ref = select(User).where(User.telegram_id == user.referred_by).options(selectinload(User.subscriptions))
+        ref_res = await db_session.execute(stmt_ref)
+        referrer = ref_res.scalar_one_or_none()
+        
+        if referrer:
+            # СЦЕНАРИЙ А: Пригласитель — Крупный блогер (PRO-СТАТУС 10% CPA)
+            if referrer.is_pro_ref:
+                commission = price * 0.10 # Считаем 10% от стоимости тарифа в USD
+                referrer.partner_balance_usd += commission
+                try:
+                    await callback.bot.send_message(
+                        chat_id=referrer.telegram_id,
+                        text=f"👑 <b>PRO-Начисление!</b> Твой реферал совершил первую покупку тарифа {plan_type.upper()}.\nТебе начислено: <b>${commission:.2f}</b>"
+                    )
+                except Exception: pass
+            
+            # СЦЕНАРИЙ Б: Пригласитель — Обычный пользователь (Зеркалка 1:1 по дням)
+            else:
+                ref_target_sub = next((s for s in referrer.subscriptions if s.plan_type == plan_type), None)
+                if ref_target_sub:
+                    if ref_target_sub.is_active and ref_target_sub.expires_at > now:
+                        ref_target_sub.expires_at += datetime.timedelta(days=days)
+                    else:
+                        ref_target_sub.expires_at = now + datetime.timedelta(days=days)
+                        ref_target_sub.is_active = True
+                else:
+                    new_ref_sub = Subscription(user_id=referrer.telegram_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days))
+                    db_session.add(new_ref_sub)
+                
+                try:
+                    await callback.bot.send_message(
+                        chat_id=referrer.telegram_id,
+                        text=f"🎁 <b>Реферальный бонус 1:1!</b> Твой друг купил тариф {plan_type.upper()} на {days} дней. Тебе начислено <b>{days} дней такого же тарифа в подарок!</b>"
+                    )
+                except Exception: pass
+
+    # 5. Логируем успешный платеж для защиты от Double Spend
+    payment_log = PaymentLog(invoice_id=invoice_id, user_id=user_id, plan_type=plan_type, amount=price, ref_processed=True)
+    db_session.add(payment_log)
+
+    # 6. КАСКАДНЫЙ ПУШ ДОСТУПОВ НА ВСЕ СЕРВЕРА СЕТИ ПО МУЛЬТИ-API
+    servers_res = await db_session.execute(select(Server).where(Server.is_active == True))
+    servers = servers_res.scalars().all()
+    
+    keys_stmt = select(VPNKey).join(Subscription).where(Subscription.user_id == user_id)
+    keys_res = await db_session.execute(keys_stmt)
+    existing_keys = {k.server_id: k for k in keys_res.scalars().all()}
+    
+    active_end_date = active_sub_obj.expires_at
+    expiry_timestamp = int(active_end_date.timestamp() * 1000)
+    
+    import uuid
+    from services.xui import XUIMultiClient
+    
+    for srv in servers:
+        # Выбираем порты тарифа
+        if plan_type == "premium" or not is_pending_status:
+            ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_(["base", "premium"]))
+        else:
+            ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type == "base")
+            
+        ib_res = await db_session.execute(ib_stmt)
+        inbound_ids = [ib.inbound_id for ib in ib_res.scalars().all()]
+        if not inbound_ids: continue
+        
+        xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
+        
+        if srv.id not in existing_keys:
+            # Создаем аккаунт с нуля, лимитируя трафик (150/300 ГБ) и выставляя 3 IP
+            email = f"usr_{user_id}_{uuid.uuid4().hex[:4]}"
+            sub_id = uuid.uuid4().hex
+            success = await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days, plan_type=plan_type)
+            if success:
+                key_record = VPNKey(subscription_id=active_sub_obj.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=sub_id)
+                db_session.add(key_record)
+        else:
+            # Накатываем новые лимиты и время на существующий ключ без удаления подписки у юзера
+            current_key = existing_keys[srv.id]
+            target_bytes = (300 if plan_type == "premium" else 150) * 1024 * 1024 * 1024
+            await xui.attach_client_inbounds(email=current_key.client_email, inbound_ids=inbound_ids)
+            
+            # Обновляем глобальную строку времени на панели
+            path_get = f"panel/api/clients/get/{current_key.client_email}"
+            res_get = await xui._request("GET", path_get)
+            if res_get and res_get.get("success") and res_get.get("obj"):
+                p_data = res_get.get("obj")
+                payload_up = {"id": p_data.get("id"), "email": current_key.client_email, "totalGB": target_bytes, "expiryTime": expiry_timestamp, "subId": p_data.get("subId"), "limitIp": 3, "enable": True}
+                await xui._request("POST", f"panel/api/clients/update/{current_key.client_email}", json_data=payload_up)
+                await xui._request("POST", f"panel/api/clients/resetTraffic/{current_key.client_email}")
+
+    await db_session.commit()
+
