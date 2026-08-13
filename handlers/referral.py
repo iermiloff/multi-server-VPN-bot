@@ -34,7 +34,7 @@ async def cb_menu_referral(callback: CallbackQuery, db_session: AsyncSession):
     ) or 0
     
     bot_username = (await callback.bot.get_me()).username
-    ref_link = f"https://t.me{bot_username}?start=ref{user_id}"
+    ref_link = f"https://t.me/{bot_username}?start=ref{user_id}"
     
     kb = []
     
