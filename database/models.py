@@ -59,15 +59,17 @@ class User(Base):
 
     subscriptions: Mapped[List["Subscription"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
+
 class Subscription(Base):
     __tablename__ = "subscriptions"
-    
+
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
-    plan_type: Mapped[SubscriptionType] = mapped_column(String(20), default=SubscriptionType.BASE)
+    plan_type: Mapped[SubscriptionType] = mapped_column(Enum(SubscriptionType))
     expires_at: Mapped[datetime.datetime] = mapped_column(DateTime)
-    is_active: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
-    
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("'1'"))
+    is_pending: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("'0'"))
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
     user: Mapped["User"] = relationship(back_populates="subscriptions")
     keys: Mapped[List["VPNKey"]] = relationship(back_populates="subscription", cascade="all, delete-orphan")
 
