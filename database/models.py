@@ -46,6 +46,7 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     username: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     is_admin: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    referred_by: Mapped[int] = mapped_column(BigInteger, nullable=True)
     registered_at: Mapped[datetime.datetime] = mapped_column(default=datetime.datetime.utcnow)
     
     last_free_trial: Mapped[Optional[datetime.datetime]] = mapped_column(nullable=True)
