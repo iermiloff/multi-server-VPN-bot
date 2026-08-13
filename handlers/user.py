@@ -169,21 +169,29 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
             if sub.expires_at <= now: continue
             profile_text += f"\nТариф: <b>{sub.plan_type.upper()}</b> (До: <code>{expires_str}</code>)\n"
             
-            traffic_text = "📊 Трафик: <i>⌛ Загружаем...</i>\n"
-            if all_user_keys:
+            traffic_text = "📊 Трафик: <i>⌛ Загружаем счетчики...</i>\n"
+            
+            if all_user_keys and len(all_user_keys) > 0:
                 target_key = all_user_keys[0]
+                
                 if target_key.server:
                     xui = XUIMultiClient(api_url=target_key.server.api_url, api_token=target_key.server.api_token)
                     stats = await xui.get_client_traffic(target_key.client_email)
+                    
                     if stats:
                         bytes_used = stats.get("up", 0) + stats.get("down", 0)
                         gb_used = round(bytes_used / (1024 * 1024 * 1024), 1)
                         gb_limit = 300 if sub.plan_type == SubscriptionType.PREMIUM else 150
                         gb_left = max(0.0, round(gb_limit - gb_used, 1))
-                        bar = "🟩" * min(10, int(gb_used / (gb_limit / 10))) + "⬜" * (10 - min(10, int(gb_used / (gb_limit / 10))))
+                        
+                        used_segments = min(10, int(gb_used / (gb_limit / 10)))
+                        bar = "🟩" * used_segments + "⬜" * (10 - used_segments)
                         traffic_text = f"📊 Трафик: <b>{gb_used} ГБ</b> из <b>{gb_limit} ГБ</b>\n└ Осталось: <b>{gb_left} ГБ</b>\n└ Контур: <code>{bar}</code>\n"
+            else:
+                traffic_text = "📊 Трафик: <code>0.0 ГБ</code> (Подключения еще не созданы)\n"
             
             profile_text += traffic_text
+
             
             for key in all_user_keys:
                 if key.server:
@@ -317,7 +325,7 @@ async def cb_claim_partner_bonus(callback: CallbackQuery, db_session: AsyncSessi
                 return
         except Exception:
             await callback.answer("❌ Ошибка проверки каналов.", show_alert=True)
-            return  # <-- ИСПРАВЛЕНО: Теперь этот return стоит строго на уровне 12 пробелов от края!
+            return
             
     await callback.message.edit_text("⏳ <i>Проверка пройдена! Нарезаем доступы...</i>")
     await provision_multiserver_subscription(callback, db_session)
