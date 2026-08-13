@@ -140,3 +140,12 @@ class XUIMultiClient:
         path = f"panel/api/clients/update/{email}"
         res = await self._request("POST", path, json_data=payload)
         return res is not None and res.get("success", False)
+
+
+    async def get_client_traffic(self, email: str) -> Optional[Dict[str, Any]]:
+        """Запрашивает живые счетчики трафика (up/down) клиента по email (стр. 13)"""
+        path = f"panel/api/clients/traffic/{email}"
+        res = await self._request("GET", path)
+        if res and res.get("success"):
+            return res.get("obj")  # Вернет словарь с полями up, down, total и т.д.
+        return None
