@@ -139,10 +139,14 @@ async def render_user_card(message_obj: Any, db_session: AsyncSession, target_id
         if s.is_active:
             status = "💤 В очереди" if s.is_pending else "🟢 Активна" if s.expires_at > now else "❌ Истекла"
             text += f"  ├ <code>{s.plan_type.upper()}</code> -> {status} (До: {s.expires_at.strftime('%d.%m.%Y %H:%M')})\n"
-            
-    kb = [[InlineKeyboardButton(text="➕ Начислить подписку", callback_data=f"adm_crm_add_days_{target_id}")],
-          [InlineKeyboardButton(text="🛑 Аннулировать подписки", callback_data=f"adm_crm_wipe_subs_{target_id}")],
-          [InlineKeyboardButton(text="◀️ Назад в CRM", callback_data="adm_crm_menu")]]
+
+    kb = [
+        [InlineKeyboardButton(text="➕ Начислить / Продлить подписку", callback_data=f"adm_crm_add_days_{target_id}")],
+        [InlineKeyboardButton(text="🛑 Аннулировать все подписки", callback_data=f"adm_crm_wipe_subs_{target_id}")],
+        [InlineKeyboardButton(text="🗑 Полностью удалить клиента из СУБД", callback_data=f"adm_crm_delete_user_{target_id}")],
+        [InlineKeyboardButton(text="◀️ Назад в CRM", callback_data="adm_crm_menu")]
+    ]
+
     if is_callback: await message_obj.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     else: await message_obj.answer(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
@@ -351,7 +355,34 @@ async def cb_adm_crm_wipe_subs(callback: CallbackQuery, db_session: AsyncSession
     await callback.answer("🗑 Все доступы аннулированы!", show_alert=True)
     await render_user_card(callback.message, db_session, target_id, is_callback=True)
 
-# handlers/admin.py — ШАГ 6 ИЗ 5
+
+@admin_router.callback_query(F.data.startswith("adm_crm_delete_user_"))
+async def cb_adm_crm_delete_user_finalize(callback: CallbackQuery, db_session: AsyncSession):
+    """Полное безвозвратное удаление клиента из бота и со всех серверов VPN"""
+    target_id = int(callback.data.split("_")[-1])
+    
+    # 1. Сначала полностью сносим аккаунт клиента со всех серверов по API 3x-ui
+    try:
+        await deactivate_user_on_servers(db_session, target_id)
+    except Exception as e:
+        logger.error(f"Ошибка при каскадном удалении {target_id} с серверов Xray: {e}")
+
+    # 2. Извлекаем объект пользователя из базы данных бота
+    stmt = select(User).where(User.telegram_id == target_id)
+    res = await db_session.execute(stmt)
+    user_obj = res.scalar_one_or_none()
+    
+    if user_obj:
+        # Благодаря ForeignKey(..., ondelete="CASCADE") СУБД сама сотрет подписки и vpn_keys
+        await db_session.delete(user_obj)
+        await db_session.commit()
+        await callback.answer(f"🗑 Пользователь {target_id} и все его ключи безвозвратно удалены!", show_alert=True)
+    else:
+        await callback.answer("❌ Пользователь не найден в базе данных бота.", show_alert=True)
+        
+    # 3. Плавно возвращаем администратора в главное меню CRM (к списку последних клиентов)
+    await cb_adm_crm_menu(callback, db_session)
+
 
 @admin_router.callback_query(F.data == "adm_servers_list")
 async def cb_adm_servers_list(callback: CallbackQuery, db_session: AsyncSession):
