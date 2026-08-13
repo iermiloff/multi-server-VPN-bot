@@ -1,4 +1,4 @@
-# services/xui.py — ПОЛНЫЙ ЛИСТИНГ API-КЛИЕНТА С ОТКЛЮЧЕНИЕМ SSL И ПРОДЛЕНИЕМ
+# services/xui.py — ПОЛНЫЙ РАБОЧИЙ КОД БЕЗ СЛЭШЕЙ НА КОНЦЕ
 import logging
 import aiohttp
 import json
@@ -36,6 +36,7 @@ class XUIMultiClient:
         return []
 
     async def add_client(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int) -> bool:
+        """Добавление клиента — ПУТЬ БЕЗ СЛЭША НА КОНЦЕ"""
         expiry_time = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp() * 1000)
         success_any = False
         
@@ -44,7 +45,8 @@ class XUIMultiClient:
                 "id": sub_id, "email": email, "limitIp": 0, "totalGB": 0,
                 "expiryTime": expiry_time, "enable": True, "tgId": "", "subId": sub_id
             }
-            path = f"panel/api/inbounds/addClient/"
+            # Убрали слэш на конце, как было изначально
+            path = "panel/api/inbounds/addClient"
             payload = {"id": ib_id, "settings": json.dumps({"clients": [client_data]})}
             res = await self._request("POST", path, json_data=payload)
             if res and res.get("success"):
@@ -52,7 +54,7 @@ class XUIMultiClient:
         return success_any
 
     async def update_client_expiry(self, email: str, expiry_time: int) -> bool:
-        """Обновляет время окончания подписки клиента по его email в панели 3x-ui"""
+        """Обновление времени клиента — ПУТЬ БЕЗ СЛЭША НА КОНЦЕ"""
         inbounds = await self.get_inbounds()
         if not inbounds:
             return False
@@ -70,7 +72,8 @@ class XUIMultiClient:
                     inbound_id = ib.get("id")
                     client["expiryTime"] = expiry_time
                     
-                    path = f"panel/api/inbounds/updateClient/{client_id}/"
+                    # Убрали слэш на конце, как было изначально
+                    path = f"panel/api/inbounds/updateClient/{client_id}"
                     payload = {"id": inbound_id, "settings": json.dumps({"clients": [client]})}
                     res = await self._request("POST", path, json_data=payload)
                     return res is not None and res.get("success", False)
