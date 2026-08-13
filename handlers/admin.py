@@ -93,9 +93,9 @@ async def cmd_admin(message: Message, db_session: AsyncSession):
 @admin_router.callback_query(F.data == "adm_main_menu")
 async def cb_admin_main_menu(callback: CallbackQuery, db_session: AsyncSession):
     """Сквозной возврат на главный дашборд админки"""
-    await callback.answer()
-    text = await get_admin_dashboard_text(db_session)
-    await callback.message.edit_text(text=text, reply_markup=get_admin_main_keyboard())
+    if callback:
+        await callback.answer()
+        await callback.message.edit_text(text=await get_admin_dashboard_text(db_session), reply_markup=get_admin_main_keyboard())
 
 @admin_router.callback_query(F.data == "adm_crm_menu")
 async def cb_adm_crm_menu(callback: CallbackQuery, db_session: AsyncSession):
@@ -126,6 +126,12 @@ async def cb_adm_user_search_start(callback: CallbackQuery, state: FSMContext):
 
 @admin_router.message(AdminCrmStates.wait_for_search_id)
 async def msg_adm_user_search_id(message: Message, state: FSMContext, db_session: AsyncSession):
+    # ЗАЩИТА: Сброс при вводе слэш-команды
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
+
     try:
         target_id = int(message.text.strip())
     except ValueError:
@@ -154,7 +160,7 @@ async def render_user_card(message_obj: Any, db_session: AsyncSession, target_id
     text = f"👤 <b>Карточка пользователя: {user.telegram_id}</b>\n\n• <b>Юзернейм:</b> {username_str}\n• <b>Дата регистрации:</b> {user.registered_at.strftime('%d.%m.%Y %H:%M')}\n"
     
     if not active_subs:
-        text += "• <b>Статус подписки:</b> ❌ Не active\n"
+        text += "• <b>Статус подписки:</b> ❌ Не активна\n"
     else:
         text += "• <b>Активные доступы:</b>\n"
         for s in active_subs:
@@ -200,6 +206,12 @@ async def cb_adm_crm_select_plan(callback: CallbackQuery, state: FSMContext):
 
 @admin_router.message(AdminCrmStates.wait_for_days_count)
 async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session: AsyncSession):
+    # ЗАЩИТА: Сброс при вводе слэш-команды
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
+
     try:
         days = int(message.text.strip())
     except ValueError:
@@ -226,6 +238,8 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         
     await db_session.commit()
     await message.answer(f"✅ Успешно начислено <b>{days} дн.</b> тарифа {plan_type.upper()}! До: <code>{end_date.strftime('%d.%m.%Y %H:%M')}</code>")
+    
+    # АВТО-ВОЗВРАТ: Сразу возвращаем админа в карточку пользователя
     await render_user_card(message, db_session, target_id)
 
 @admin_router.callback_query(F.data.startswith("adm_crm_wipe_subs_"))
@@ -248,7 +262,8 @@ async def cb_adm_crm_wipe_subs(callback: CallbackQuery, db_session: AsyncSession
 @admin_router.callback_query(F.data == "adm_servers_list")
 async def cb_adm_servers_list(callback: CallbackQuery, db_session: AsyncSession):
     """Вывод списка всех зарегистрированных нод 3x-ui"""
-    await callback.answer()
+    if callback:
+        await callback.answer()
     res = await db_session.execute(select(Server))
     servers = res.scalars().all()
     text = "🖥 <b>Список подключенных серверов 3x-ui:</b>\n\n"
@@ -261,9 +276,12 @@ async def cb_adm_servers_list(callback: CallbackQuery, db_session: AsyncSession)
         kb.append([InlineKeyboardButton(text=f"⚙️ Настроить {s.name}", callback_data=f"adm_srv_manage_{s.id}")])
     kb.append([InlineKeyboardButton(text="➕ Добавить сервер", callback_data="adm_srv_add_start")])
     kb.append([InlineKeyboardButton(text="◀️ Панель управления", callback_data="adm_main_menu")])
-    await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    
+    if callback:
+        await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    return text, InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- Линейный сценарий FSM добавления нового сервера ---
+# --- Сценарий добавления сервера ---
 @admin_router.callback_query(F.data == "adm_srv_add_start")
 async def cb_adm_srv_add_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -271,25 +289,41 @@ async def cb_adm_srv_add_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("📝 <b>Шаг 1/5:</b> Введите название ноды (например: <code>Германия #1</code>):")
 
 @admin_router.message(AdminServerStates.wait_for_name)
-async def msg_srv_name(message: Message, state: FSMContext):
+async def msg_srv_name(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     await state.update_data(name=message.text.strip())
     await state.set_state(AdminServerStates.wait_for_url)
     await message.answer("🔗 <b>Шаг 2/5:</b> Введите URL API панели (например: <code>https://123.45.67.89:2053</code>):")
 
 @admin_router.message(AdminServerStates.wait_for_url)
-async def msg_srv_url(message: Message, state: FSMContext):
+async def msg_srv_url(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     await state.update_data(api_url=message.text.strip())
     await state.set_state(AdminServerStates.wait_for_token)
     await message.answer("🔑 <b>Шаг 3/5:</b> Введите <b>API Token (Bearer)</b> панели:")
 
 @admin_router.message(AdminServerStates.wait_for_token)
-async def msg_srv_token(message: Message, state: FSMContext):
+async def msg_srv_token(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     await state.update_data(api_token=message.text.strip())
     await state.set_state(AdminServerStates.wait_for_sub_port)
     await message.answer("🔌 <b>Шаг 4/5:</b> Введите порт подписки для этого сервера (дефолт: <code>2096</code>):")
 
 @admin_router.message(AdminServerStates.wait_for_sub_port)
-async def msg_srv_sub_port(message: Message, state: FSMContext):
+async def msg_srv_sub_port(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     try:
         sub_port = int(message.text.strip())
     except ValueError:
@@ -301,13 +335,20 @@ async def msg_srv_sub_port(message: Message, state: FSMContext):
 
 @admin_router.message(AdminServerStates.wait_for_sub_path)
 async def msg_srv_sub_path(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     sub_path = message.text.strip().strip("/")
     data = await state.get_data()
     await state.clear()
     new_server = Server(name=data["name"], api_url=data["api_url"], api_token=data["api_token"], sub_port=data["sub_port"], sub_path=sub_path)
     db_session.add(new_server)
     await db_session.commit()
-    await message.answer(f"✅ <b>Сервер '{data['name']}' успешно сохранен!</b>")
+    
+    # АВТО-ВОЗВРАТ: Сразу выводим обновленный список серверов
+    t, km = await cb_adm_servers_list(None, db_session)
+    await message.answer(text=f"✅ <b>Сервер '{data['name']}' успешно сохранен!</b>\n\n{t}", reply_markup=km)
 
 # --- Сценарий БЕЗОПАСНОГО редактирования параметров сервера через UPDATE ---
 @admin_router.callback_query(F.data.startswith("adm_srv_edit_"))
@@ -319,25 +360,41 @@ async def cb_adm_srv_edit_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("✏️ <b>Редактирование. Шаг 1/5:</b> Введите НОВОЕ название ноды:")
 
 @admin_router.message(AdminServerEditStates.wait_for_name)
-async def msg_srv_edit_name(message: Message, state: FSMContext):
+async def msg_srv_edit_name(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     await state.update_data(name=message.text.strip())
     await state.set_state(AdminServerEditStates.wait_for_url)
     await message.answer("🔗 <b>Шаг 2/5:</b> Введите НОВЫЙ URL API панели:")
 
 @admin_router.message(AdminServerEditStates.wait_for_url)
-async def msg_srv_edit_url(message: Message, state: FSMContext):
+async def msg_srv_edit_url(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     await state.update_data(api_url=message.text.strip())
     await state.set_state(AdminServerEditStates.wait_for_token)
     await message.answer("🔑 <b>Шаг 3/5:</b> Введите НОВЫЙ <b>API Token (Bearer)</b> панели:")
 
 @admin_router.message(AdminServerEditStates.wait_for_token)
-async def msg_srv_edit_token(message: Message, state: FSMContext):
+async def msg_srv_edit_token(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     await state.update_data(api_token=message.text.strip())
     await state.set_state(AdminServerEditStates.wait_for_sub_port)
     await message.answer("🔌 <b>Шаг 4/5:</b> Введите НОВЫЙ порт подписки:")
 
 @admin_router.message(AdminServerEditStates.wait_for_sub_port)
-async def msg_srv_edit_sub_port(message: Message, state: FSMContext):
+async def msg_srv_edit_sub_port(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     try:
         sub_port = int(message.text.strip())
     except ValueError:
@@ -349,6 +406,10 @@ async def msg_srv_edit_sub_port(message: Message, state: FSMContext):
 
 @admin_router.message(AdminServerEditStates.wait_for_sub_path)
 async def msg_srv_edit_finalize(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     sub_path = message.text.strip().strip("/")
     data = await state.get_data()
     await state.clear()
@@ -357,15 +418,16 @@ async def msg_srv_edit_finalize(message: Message, state: FSMContext, db_session:
     res = await db_session.execute(stmt)
     srv = res.scalar_one()
     
-    # ЧИСТЫЙ UPDATE: id и связи vpn_keys не затрагиваются, клоны не создаются!
     srv.name = data["name"]
     srv.api_url = data["api_url"]
     srv.api_token = data["api_token"]
     srv.sub_port = data["sub_port"]
     srv.sub_path = sub_path
-    
     await db_session.commit()
-    await message.answer(f"✅ <b>Параметры ноды успешно обновлены!</b> Все текущие ключи и подписки сохранены.")
+    
+    # АВТО-ВОЗВРАТ: Показываем обновленные ноды
+    t, km = await cb_adm_servers_list(None, db_session)
+    await message.answer(text=f"✅ <b>Параметры ноды успешно обновлены!</b>\n\n{t}", reply_markup=km)
 
 @admin_router.callback_query(F.data.startswith("adm_srv_del_"))
 async def cb_adm_srv_del(callback: CallbackQuery, db_session: AsyncSession):
@@ -423,8 +485,7 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"adm_toggle_ib_{srv.id}_{ib_id}")])
 
     kb.append([InlineKeyboardButton(text="◀️ Назад к серверам", callback_data="adm_servers_list")])
-    try:
-        await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    try: await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     except Exception: pass
 
 @admin_router.callback_query(F.data.startswith("adm_toggle_ib_"))
@@ -432,7 +493,7 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
     """Чистое переключение тарифов инбаундов с изолированной сессией обновления"""
     raw_data = callback.data.replace("adm_toggle_ib_", "")
     parts = raw_data.split("_", 1)
-    server_id, ib_id = int(parts), int(parts[1].strip())
+    server_id, ib_id = int(parts), int(parts.strip())
 
     stmt = select(Server).where(Server.id == server_id)
     res = await db_session.execute(stmt)
@@ -479,7 +540,8 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
 
 @admin_router.callback_query(F.data == "adm_partners_list")
 async def cb_adm_partners_list(callback: CallbackQuery, db_session: AsyncSession):
-    await callback.answer()
+    if callback:
+        await callback.answer()
     res = await db_session.execute(select(PartnerChannel))
     channels = res.scalars().all()
     text = "📢 <b>Управление каналами и подписками:</b>\n\n"
@@ -490,8 +552,11 @@ async def cb_adm_partners_list(callback: CallbackQuery, db_session: AsyncSession
             role = "🛠 Саппорт" if ch.is_required else "🎁 Спонсор"
             text += f"• <b>{ch.channel_name}</b> [{role}]\nID: <code>{ch.channel_id}</code>\n\n"
             kb.append([InlineKeyboardButton(text=f"❌ Удалить {ch.channel_name}", callback_data=f"adm_part_del_{ch.id}")])
-    kb.append([InlineKeyboardButton(text="➕ Добавить channel", callback_data="adm_part_add_start"), InlineKeyboardButton(text="◀️ Меню", callback_data="adm_main_menu")])
-    await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    kb.append([InlineKeyboardButton(text="➕ Добавить канал", callback_data="adm_part_add_start"), InlineKeyboardButton(text="◀️ Меню", callback_data="adm_main_menu")])
+    
+    if callback:
+        await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    return text, InlineKeyboardMarkup(inline_keyboard=kb)
 
 @admin_router.callback_query(F.data == "adm_part_add_start")
 async def cb_adm_part_add_start(callback: CallbackQuery, state: FSMContext):
@@ -500,7 +565,11 @@ async def cb_adm_part_add_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("🆔 <b>Шаг 1/4:</b> Введите цифровой <b>Telegram ID канала</b>:")
 
 @admin_router.message(AdminPartnerStates.wait_for_id)
-async def msg_part_id(message: Message, state: FSMContext):
+async def msg_part_id(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     try: ch_id = int(message.text.strip())
     except ValueError:
         await message.answer("❌ ID должен быть числом! Попробуйте еще раз:")
@@ -510,13 +579,21 @@ async def msg_part_id(message: Message, state: FSMContext):
     await message.answer("📝 <b>Шаг 2/4:</b> Введите название канала:")
 
 @admin_router.message(AdminPartnerStates.wait_for_name)
-async def msg_part_name(message: Message, state: FSMContext):
+async def msg_part_name(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     await state.update_data(channel_name=message.text.strip())
     await state.set_state(AdminPartnerStates.wait_for_link)
     await message.answer("🔗 <b>Шаг 3/4:</b> Введите ссылку-приглашение:")
 
 @admin_router.message(AdminPartnerStates.wait_for_link)
-async def msg_part_link(message: Message, state: FSMContext):
+async def msg_part_link(message: Message, state: FSMContext, db_session: AsyncSession):
+    if message.text.startswith("/"):
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
     await state.update_data(invite_link=message.text.strip())
     await state.set_state(AdminPartnerStates.wait_for_type)
     kb = [[InlineKeyboardButton(text="🎁 Спонсор", callback_data="role_sponsor"), InlineKeyboardButton(text="🛠 Саппорт", callback_data="role_support")]]
@@ -531,11 +608,13 @@ async def cb_part_finalize(callback: CallbackQuery, state: FSMContext, db_sessio
     new_channel = PartnerChannel(channel_id=data["channel_id"], channel_name=data["channel_name"], invite_link=data["invite_link"], is_required=is_required)
     db_session.add(new_channel)
     await db_session.commit()
-    await callback.message.edit_text(f"✅ <b>Канал успешно сохранен!</b>")
-    await cb_adm_partners_list(callback, db_session)
+    
+    # АВТО-ВОЗВРАТ: Показываем обновленный список каналов
+    t, km = await cb_adm_partners_list(None, db_session)
+    await callback.message.edit_text(text=f"✅ <b>Канал успешно сохранен!</b>\n\n{t}", reply_markup=km)
 
 @admin_router.callback_query(F.data.startswith("adm_part_del_"))
-async def cb_adm_part_del(callback: CallbackQuery, db_session: AsyncSession):
+async def cb_part_del(callback: CallbackQuery, db_session: AsyncSession):
     ch_id = int(callback.data.split("_")[-1])
     stmt = select(PartnerChannel).where(PartnerChannel.id == ch_id)
     res = await db_session.execute(stmt)
