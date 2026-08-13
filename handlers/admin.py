@@ -307,36 +307,27 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                     key_record = VPNKey(subscription_id=active_subscription_object.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=subscribe_url)
                     db_session.add(key_record)
                     nodes_synced += 1
+
             else:
-                # ВЕТКА КЛЮЧ УЖЕ ЕСТЬ (СЕРВЕР Base-1/Main-1) — БЕЗОПАСНЫЙ СДВИГ ВРЕМЕНИ
                 current_key = existing_keys[srv.id]
+                
                 expiry_timestamp = int(active_end_date.timestamp() * 1000)
                 
-                # 1. Перенарезаем инбаунды под пул портов Премиума, передавая точный таймштамп
-                await xui.update_client_inbounds(email=current_key.client_email, sub_id=current_key.sub_id, inbound_ids=inbound_ids, expiry_time=expiry_timestamp)
-                
-                # 2. Запрашиваем из панели текущую карточку клиента, чтобы узнать дельту дней
-                path_get = f"panel/api/clients/get/{current_key.client_email}"
-                res_get = await xui._request("GET", path_get)
-                
-                if res_get and res_get.get("success") and res_get.get("obj"):
-                    client_panel_data = res_get.get("obj")
-                    current_expiry_ts = client_panel_data.get("expiryTime", 0) / 1000
-                    
-                    # Переводим таймштамп панели в читаемую дату Python
-                    current_expiry_date = datetime.datetime.fromtimestamp(current_expiry_ts)
-                    
-                    # Считаем разницу между целевой датой премиума (60 дней) и тем, что сейчас есть на панели (30 дней)
-                    days_delta = (active_end_date - current_expiry_date).days
-                    
-                    # 3. Вызываем bulkAdjust для жесткого пробития кэша инбаундов
-                    if days_delta != 0:
-                        await xui.adjust_client_days(emails=[current_key.client_email], add_days=days_delta)
-                else:
-                    # Запасной вариант, если панель временно не отдала карточку
-                    await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
+                # 1. Перенарезаем инбаунды под новый PREMIUM-пул портов
+                await xui.update_client_inbounds(
+                    email=current_key.client_email, 
+                    sub_id=current_key.sub_id, 
+                    inbound_ids=inbound_ids, 
+                    expiry_time=expiry_timestamp
+                )
+
+                await xui.update_client_expiry(
+                    email=current_key.client_email, 
+                    expiry_time=expiry_timestamp
+                )
                 
                 nodes_synced += 1
+
 
 
     await db_session.commit()
