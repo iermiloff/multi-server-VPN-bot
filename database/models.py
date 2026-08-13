@@ -113,4 +113,5 @@ class PaymentLog(Base):
     plan_type: Mapped[str] = mapped_column(String(50))
     amount: Mapped[float] = mapped_column(BigInteger)
     paid_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
+    ref_processed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("'0'"))
 
