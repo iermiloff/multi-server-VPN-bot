@@ -86,29 +86,41 @@ class XUIMultiClient:
         return res is not None and res.get("success", False)
 
     async def update_client_expiry(self, email: str, expiry_time: int) -> bool:
-        """Точечное продление времени действия существующего клиента по его email"""
-        # Сначала запрашиваем детальную информацию о клиенте из глобальной базы панели
-        path_get = f"panel/api/clients/get/{email}"
-        res_get = await self._request("GET", path_get)
+        """Точечное продление времени действия существующего клиента по его UUID"""
+        # Сначала находим карточку клиента, чтобы не затереть его текущие inboundIds
+        inbounds = await self.get_inbounds()
+        if not inbounds: return False
         
-        if not (res_get and res_get.get("success") and res_get.get("obj")):
-            logger.error(f"Не удалось получить карточку клиента {email} для продления.")
+        import json
+        target_client = None
+        
+        for ib in inbounds:
+            settings = ib.get("settings", {})
+            if isinstance(settings, str):
+                try: settings = json.loads(settings)
+                except Exception: continue
+            for client in settings.get("clients", []):
+                if client.get("email") == email:
+                    target_client = client
+                    break
+            if target_client: break
+            
+        if not target_client:
+            logger.error(f"Клиент {email} не найден в инбаундах панели для продления времени.")
             return False
             
-        # Извлекаем текущий полный JSON-объект клиента из панели
-        client_data = res_get.get("obj")
+        # Меняем timestamp и забираем UUID (id) клиента в панели
+        target_client["expiryTime"] = expiry_time
+        client_uuid = target_client.get("id")
         
-        # Меняем только таймштамп окончания подписки (в миллисекундах)
-        client_data["expiryTime"] = expiry_time
-        
-        # Отправляем обновленный монолитный объект обратно согласно спецификации API
-        path_update = f"panel/api/clients/update/{email}"
-        res = await self._request("POST", path_update, json_data=client_data)
+        # ИСПРАВЛЕНО: Стучимся на эндпоинт обновления строго по UUID клиента
+        path_update = f"panel/api/clients/update/{client_uuid}"
+        res = await self._request("POST", path_update, json_data=target_client)
         return res is not None and res.get("success", False)
 
 
     async def update_client_inbounds(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int) -> bool:
-        """Перенарезает список инбаундов (inboundIds) для существующего глобального мульти-клиента"""
+        """Перенарезает список инбаундов для существующего глобального мульти-клиента"""
         expiry_time = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp() * 1000)
         
         payload = {
@@ -119,10 +131,10 @@ class XUIMultiClient:
             "expiryTime": expiry_time,
             "enable": True,
             "subId": sub_id,
-            "inboundIds": inbound_ids  # Новые порты тарифа
+            "inboundIds": inbound_ids
         }
         
-        # Согласно OAS 3.0 спецификации, отправляем на эндпоинт обновления мульти-клиента
+        # ИСПРАВЛЕНО: В пути вместо email передаем sub_id (UUID), как требует спецификация панели!
         path = f"panel/api/clients/update/{sub_id}"
         res = await self._request("POST", path, json_data=payload)
         return res is not None and res.get("success", False)
