@@ -1,4 +1,4 @@
-# services/xui.py — ПОЛНЫЙ РАБОЧИЙ КОД БЕЗ СЛЭШЕЙ НА КОНЦЕ
+# services/xui.py — ШАГ 1 ИЗ 2 (НОВЫЙ СТАНДАРТ МУЛЬТИ-API)
 import logging
 import aiohttp
 import json
@@ -36,25 +36,30 @@ class XUIMultiClient:
         return []
 
     async def add_client(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int) -> bool:
-        """Добавление клиента — ПУТЬ БЕЗ СЛЭША НА КОНЦЕ"""
+        """ИСПРАВЛЕНО ПО ДОКУМЕНТАЦИИ: создание клиента сразу во всех инбаундах"""
         expiry_time = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp() * 1000)
-        success_any = False
         
-        for ib_id in inbound_ids:
-            client_data = {
-                "id": sub_id, "email": email, "limitIp": 0, "totalGB": 0,
-                "expiryTime": expiry_time, "enable": True, "tgId": "", "subId": sub_id
-            }
-            # Убрали слэш на конце, как было изначально
-            path = "panel/api/inbounds/addClient"
-            payload = {"id": ib_id, "settings": json.dumps({"clients": [client_data]})}
-            res = await self._request("POST", path, json_data=payload)
-            if res and res.get("success"):
-                success_any = True
-        return success_any
+        # Согласно скриншоту, отправляем один универсальный запрос
+        payload = {
+            "id": sub_id,
+            "email": email,
+            "limitIp": 0,
+            "totalGB": 0,
+            "expiryTime": expiry_time,
+            "enable": True,
+            "subId": sub_id,
+            "inboundIds": inbound_ids  # Передаем массив портов одной пачкой!
+        }
+        
+        # Новый эндпоинт со скриншота
+        path = "panel/api/clients/add"
+        res = await self._request("POST", path, json_data=payload)
+        return res is not None and res.get("success", False)
+
+# services/xui.py — ШАГ 2 ИЗ 2 (ПРОДЛЕНИЕ ПО НОВОМУ СТАНДАРТУ)
 
     async def update_client_expiry(self, email: str, expiry_time: int) -> bool:
-        """Обновление времени клиента — ПУТЬ БЕЗ СЛЭША НА КОНЦЕ"""
+        """Обновление времени действия клиента по новому стандарту мульти-API"""
         inbounds = await self.get_inbounds()
         if not inbounds:
             return False
@@ -68,13 +73,12 @@ class XUIMultiClient:
             clients = settings.get("clients", [])
             for client in clients:
                 if client.get("email") == email:
+                    # Нашли клиента — отправляем обновление параметров на новый эндпоинт
                     client_id = client.get("id")
-                    inbound_id = ib.get("id")
                     client["expiryTime"] = expiry_time
                     
-                    # Убрали слэш на конце, как было изначально
-                    path = f"panel/api/inbounds/updateClient/{client_id}"
-                    payload = {"id": inbound_id, "settings": json.dumps({"clients": [client]})}
-                    res = await self._request("POST", path, json_data=payload)
+                    # Используем современный эндпоинт обновления мульти-клиента
+                    path = f"panel/api/clients/update/{client_id}"
+                    res = await self._request("POST", path, json_data=client)
                     return res is not None and res.get("success", False)
         return False
