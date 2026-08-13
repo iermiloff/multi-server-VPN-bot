@@ -2,6 +2,7 @@
 import logging
 import datetime
 from aiogram import Bot
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from database.db_helper import db_helper
