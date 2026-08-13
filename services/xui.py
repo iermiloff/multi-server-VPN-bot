@@ -119,22 +119,22 @@ class XUIMultiClient:
         return res is not None and res.get("success", False)
 
 
-    async def update_client_inbounds(self, email: str, sub_id: str, inbound_ids: List[int], expires_days: int) -> bool:
-        """Перенарезает список инбаундов для существующего глобального мульти-клиента"""
-        expiry_time = int((datetime.datetime.utcnow() + datetime.timedelta(days=expires_days)).timestamp() * 1000)
-        
+# services/xui.py — ИСПРАВЛЕННЫЙ МЕТОД ОБНОВЛЕНИЯ МУЛЬТИ-КЛИЕНТА
+
+    async def update_client_inbounds(self, email: str, sub_id: str, inbound_ids: List[int], expiry_time: int) -> bool:
+        """Перенарезает список инбаундов и выставляет точное время для существующего мульти-клиента"""
         payload = {
             "id": sub_id,
             "email": email,
             "limitIp": 0,
             "totalGB": 0,
-            "expiryTime": expiry_time,
+            "expiryTime": expiry_time, # Чистый таймштамп 60 дней премиума
             "enable": True,
             "subId": sub_id,
             "inboundIds": inbound_ids
         }
         
-        # ИСПРАВЛЕНО: В пути вместо email передаем sub_id (UUID), как требует спецификация панели!
         path = f"panel/api/clients/update/{sub_id}"
         res = await self._request("POST", path, json_data=payload)
         return res is not None and res.get("success", False)
+
