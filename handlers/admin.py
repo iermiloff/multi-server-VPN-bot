@@ -457,7 +457,7 @@ async def cb_adm_toggle_ib(callback: CallbackQuery, db_session: AsyncSession):
         await callback.answer("⚫ Порт полностью деактивирован")
 
     await db_session.commit()
-    await cb_adm_srv_manage(callback=callback, db_session=db_session)
+    await cb_adm_srv_manage(callback, db_session)
 
 # handlers/admin.py — ШАГ 4.3
 
