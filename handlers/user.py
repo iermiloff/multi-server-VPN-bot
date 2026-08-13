@@ -339,24 +339,22 @@ async def cb_generate_invoice(callback: CallbackQuery):
 
 @user_router.callback_query(F.data == "menu_partner_gift")
 async def cb_menu_partner_gift(callback: CallbackQuery, db_session: AsyncSession):
-    """Условия получения бесплатного месяца от партнеров"""
+    """Условия получения бесплатного месяца от партнеров — ПОЖИЗНЕННЫЙ БЛОК ПОВТОРОВ"""
     await callback.answer()
-    now = datetime.datetime.utcnow()
     
     stmt = select(User).where(User.telegram_id == callback.from_user.id)
     res = await db_session.execute(stmt)
     user = res.scalar_one()
     
+    # ИСПРАВЛЕНО: Убрали кулдаун в 30 дней. Если дата запрашивания триала есть — акция закрыта навсегда
     if user.last_partner_trial:
-        days_passed = (now - user.last_partner_trial).days
-        if days_passed < 30:
-            await callback.message.edit_text(
-                text=f"❌ <b>Доступ уже запрашивался!</b>\n\nПовторно акция будет доступна через {30 - days_passed} дн.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")
-                ]])
-            )
-            return
+        await callback.message.edit_text(
+            text="❌ <b>Доступ уже запрашивался!</b>\n\nЭтот приветственный бонус доступен только 1 раз при регистрации.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")
+            ]])
+        )
+        return
 
     stmt = select(PartnerChannel).where(PartnerChannel.is_required == False)
     res = await db_session.execute(stmt)
