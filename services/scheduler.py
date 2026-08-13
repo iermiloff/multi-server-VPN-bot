@@ -1,89 +1,95 @@
-# services/scheduler.py
+# services/scheduler.py — ПОЛНЫЙ КОД ВОРКЕРА С АВТОАКТИВАЦИЕЙ ТАРИФОВ ИЗ ОЧЕРЕДИ
 import logging
 import datetime
 from aiogram import Bot
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from sqlalchemy.ext.asyncio import AsyncSession
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
 from database.db_helper import db_helper
-from database.models import User, Subscription, VPNKey
+from database.models import Subscription, VPNKey, TariffInbound, Server, SubscriptionType
 from services.xui import XUIMultiClient
 
 logger = logging.getLogger(__name__)
 
-async def deactivate_user_on_servers(session: AsyncSession, user_id: int):
-    """Полностью удаляет клиента со всех серверов при отписке"""
-    stmt = (
-        select(VPNKey)
-        .join(Subscription)
-        .where(Subscription.user_id == user_id)
-        .options(selectinload(VPNKey.server))
-    )
-    result = await session.execute(stmt)
-    keys = result.scalars().all()
+async def deactivate_user_on_servers(session, user_id: int):
+    """Каскадный снос аккаунтов со всех панелей 3x-ui"""
+    keys_stmt = select(VPNKey).join(Subscription).where(Subscription.user_id == user_id).options(selectinload(VPNKey.server))
+    keys_res = await session.execute(keys_stmt)
+    keys = keys_res.scalars().all()
     
     for key in keys:
-        if key.server and key.server.is_active:
-            xui = XUIMultiClient(key.server.api_url, key.server.api_token)
-            success = await xui.delete_client(email=key.client_email)
-            if success:
-                logger.info(f"Удален клиент {key.client_email} с ноды {key.server.name}")
-                await session.delete(key)
+        if key.server:
+            # Напрямую удаляем по API
+            import json
+            xui = XUIMultiClient(api_url=key.server.api_url, api_token=key.server.api_token)
+            inbounds = await xui.get_inbounds()
+            for ib in inbounds:
+                settings = ib.get("settings", {})
+                if isinstance(settings, str):
+                    try: settings = json.loads(settings)
+                    except Exception: continue
+                clients = settings.get("clients", [])
+                for client in clients:
+                    if client.get("email") == key.client_email:
+                        path = f"panel/api/inbounds/deleteClient/{ib.get('id')}/{client.get('id')}"
+                        await xui._request("POST", path)
+            await session.delete(key)
 
 async def check_partner_subscriptions_job(bot: Bot):
-    """Фоновая задача: проверяет подписки юзеров на ИХ персональный список спонсоров"""
+    """Проверяет сроки подписок и активирует отложенные тарифы из очереди"""
+    now = datetime.datetime.utcnow()
+    
     async with db_helper.session_factory() as session:
-        # Загружаем юзеров вместе с закрепленными за ними каналами
-        users_res = await session.execute(
-            select(User)
-            .where(User.has_active_partner_bonus == True)
-            .options(selectinload(User.subscriptions), selectinload(User.required_channels))
+        stmt = (
+            select(Subscription)
+            .where(Subscription.is_active == True, Subscription.is_pending == False, Subscription.expires_at <= now)
+            .options(selectinload(Subscription.keys).selectinload(VPNKey.server))
         )
-        users = users_res.scalars().all()
+        res = await session.execute(stmt)
+        expired_subs = res.scalars().all()
 
-        for user in users:
-            # Если за юзером по какой-то причине нет закрепленных каналов, пропускаем
-            if not user.required_channels:
-                continue
+        for sub in expired_subs:
+            user_id = sub.user_id
+            
+            queue_stmt = select(Subscription).where(
+                Subscription.user_id == user_id,
+                Subscription.is_active == True,
+                Subscription.is_pending == True
+            ).limit(1)
+            q_res = await session.execute(queue_stmt)
+            pending_sub = q_res.scalar_one_or_none()
 
-            is_unsubscribed = False
-            
-            # Проверяем строго те каналы, на которые он подписывался изначально
-            for ch in user.required_channels:
+            if pending_sub:
+                saved_days = (pending_sub.expires_at - sub.created_at).days
+                if saved_days <= 0: saved_days = 30
+                    
+                pending_sub.is_pending = False
+                pending_sub.expires_at = now + datetime.timedelta(days=saved_days)
+                sub.is_active = False
+                
+                for key in sub.keys:
+                    if key.server and key.server.is_active:
+                        if pending_sub.plan_type == SubscriptionType.PREMIUM:
+                            ib_stmt = select(TariffInbound).where(TariffInbound.server_id == key.server_id, TariffInbound.plan_type.in_([SubscriptionType.BASE, SubscriptionType.PREMIUM]))
+                        else:
+                            ib_stmt = select(TariffInbound).where(TariffInbound.server_id == key.server_id, TariffInbound.plan_type == SubscriptionType.BASE)
+                            
+                        ib_res = await session.execute(ib_stmt)
+                        inbound_ids = [ib.inbound_id for ib in ib_res.scalars().all()]
+                        
+                        if inbound_ids:
+                            xui = XUIMultiClient(api_url=key.server.api_url, api_token=key.server.api_token)
+                            expiry_timestamp = int(pending_sub.expires_at.timestamp() * 1000)
+                            await xui.add_client(email=key.client_email, sub_id=key.sub_id, inbound_ids=inbound_ids, expires_days=1)
+                            await xui.update_client_expiry(email=key.client_email, expiry_time=expiry_timestamp)
                 try:
-                    member = await bot.get_chat_member(chat_id=ch.channel_id, user_id=user.telegram_id)
-                    if member.status in ["left", "kicked"]:
-                        is_unsubscribed = True
-                        break
-                except Exception as e:
-                    # ПРЕЗУМПЦИЯ НЕВИНОВНОСТИ: Если спонсор ушел и удалил бота из админов,
-                    # мы НЕ наказываем пользователя. Проверка этого канала просто пропускается.
-                    logger.warning(
-                        f"Канал {ch.channel_id} недоступен для проверки бота. "
-                        f"Пропускаем этот канал для юзера {user.telegram_id}. Ошибка: {e}"
-                    )
-                    continue 
-            
-            # Если факт отписки от работающего канала подтвердился — отключаем
-            if is_unsubscribed:
-                logger.warning(f"Пользователь {user.telegram_id} отписался от партнеров! Отключаем.")
-                user.has_active_partner_bonus = False
-                user.required_channels = [] # Сбрасываем связи
-                
-                for sub in user.subscriptions:
-                    sub.is_active = False
-                
-                await deactivate_user_on_servers(session, user.telegram_id)
-                
+                    await bot.send_message(chat_id=user_id, text=f"🔄 <b>Смена тарифа!</b>\n\nСрок действия тарифа {sub.plan_type.upper()} истек. Автоматически активирован отложенный тариф <b>{pending_sub.plan_type.upper()}</b> на {saved_days} дней!")
+                except Exception: pass
+            else:
+                sub.is_active = False
+                await deactivate_user_on_servers(session, user_id)
                 try:
-                    await bot.send_message(
-                        chat_id=user.telegram_id,
-                        text="⚠️ <b>Доступ заблокирован!</b>\n\nВы отписались от одного из каналов наших партнеров. Бесплатный месяц аннулирован."
-                    )
-                except Exception: 
-                    pass
+                    await bot.send_message(chat_id=user_id, text="⚠️ <b>Срок действия подписки истек!</b>\n\nДоступ к VPN-серверам заблокирован. Продлите подписку в главном меню бота.")
+                except Exception: pass
                 
         await session.commit()
 
