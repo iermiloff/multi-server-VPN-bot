@@ -330,11 +330,21 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
                     # 3. Вызываем официальный bulkAdjust для жесткого пробития кэша инбаундов!
                     if days_delta != 0:
                         await xui.adjust_client_days(emails=[current_key.client_email], add_days=days_delta)
-                else:
-                    # Запасной вариант, если панель не отдала карточку — шлем прямой апдейт времени
-                    expiry_timestamp = int(active_end_date.timestamp() * 1000)
-                    await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
+            else:
+                # ОСТАВЛЯЕМ КЛЮЧ В БД КАК ЕСТЬ (БЕЗ ПЕРЕПРИВЯЗОК ID)
+                current_key = existing_keys[srv.id]
                 
+                # Рассчитываем точный таймштамп для панели (60 дней премиума)
+                expiry_timestamp = int(active_end_date.timestamp() * 1000)
+                
+                # ИСПРАВЛЕНО: Передаем имя аргумента expiry_time вместо expires_days!
+                await xui.update_client_inbounds(
+                    email=current_key.client_email, 
+                    sub_id=current_key.sub_id, 
+                    inbound_ids=inbound_ids, 
+                    expiry_time=expiry_timestamp
+                )
+                await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
                 nodes_synced += 1
 
     await db_session.commit()
