@@ -24,7 +24,7 @@ class CryptoBotClient:
 
     async def create_invoice(self, amount: float, asset: str, description: str, payload: str) -> Optional[Dict[str, Any]]:
         """Создание инвойса (счета) с автоматической поддержкой Фиата и Крипты (стр. 4)"""
-        url = f"{self.base_url}/createInvoice"
+        url = f"{self.base_url.rstrip('/')}/createInvoice"
         
         # Определение типа валюты согласно спецификации на стр. 4
         is_fiat = asset.upper() in ["USD", "EUR", "RUB", "BYN", "UAH", "KZT", "GBP", "CNY", "GEL", "TRY"]
@@ -60,7 +60,7 @@ class CryptoBotClient:
         Запрашивает информацию о конкретном счете методом пуллинга (стр. 6).
         ИСПРАВЛЕНО: Извлекает первый элемент из списка и возвращает его статус ("active", "paid", "expired").
         """
-        url = f"{self.base_url}/getInvoices"
+        url = f"{self.base_url.rstrip('/')}/getInvoices"
         params = {"invoice_ids": str(invoice_id)}
         
         try:
