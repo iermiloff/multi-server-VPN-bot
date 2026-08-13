@@ -14,7 +14,8 @@ from database.db_helper import db_helper
 from database.models import Base, PartnerChannel
 from handlers.user import user_router
 from handlers.admin import admin_router
-from services.scheduler import setup_scheduler
+# ДОБАВИЛИ: Импорт нового изолированного роутера реферальной системы
+from handlers.referral import referral_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,20 +68,23 @@ async def main():
     logger.info(f"Запуск мультисерверного бота {config.BRAND_NAME}...")
     
     bot = Bot(
-    token=config.BOT_TOKEN.get_secret_value(), 
-    default=DefaultBotProperties(parse_mode="HTML")
-)
+        token=config.BOT_TOKEN.get_secret_value(), 
+        default=DefaultBotProperties(parse_mode="HTML")
+    )
     dp = Dispatcher(storage=MemoryStorage())
     
     dp.message.middleware(DbSessionMiddleware())
     dp.callback_query.middleware(DbSessionMiddleware())
     
+    # ИСПРАВЛЕНО: Регистрируем роутеры в правильном каскадном порядке приоритетов
     dp.include_router(admin_router)
+    dp.include_router(referral_router)  # Подключаем реферальный модуль
     dp.include_router(user_router)
     
     # Запускаем автоинициализацию СУБД и бэкенда
     await auto_initialize_system()
     
+    from services.scheduler import setup_scheduler
     scheduler = setup_scheduler(bot)
     scheduler.start()
     logger.info("Планировщик проверки партнерских подписок успешно запущен.")
