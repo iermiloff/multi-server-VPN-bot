@@ -221,7 +221,6 @@ async def cb_back_to_main(callback: CallbackQuery):
     await callback.answer()
     await callback.message.edit_text(text=f"👋 Добро пожаловать в <b>{config.BRAND_NAME}</b>!", reply_markup=get_main_menu_keyboard())
 
-# handlers/user.py — ЧАСТЬ 3 ИЗ 4
 
 def get_periods_keyboard(plan_type: str) -> InlineKeyboardMarkup:
     keyboard = [
@@ -264,38 +263,79 @@ async def cb_buy_plan(callback: CallbackQuery):
     plan_type = callback.data.split("_")[-1]
     await callback.message.edit_text(text="⏱ <b>Выберите срок действия подписки:</b>", reply_markup=get_periods_keyboard(plan_type))
 
+
 @user_router.callback_query(F.data.startswith("buy_time_"))
-async def cb_generate_invoice(callback: CallbackQuery):
-    """Выставление счета в CryptoBot"""
+async def cb_select_payment_method(callback: CallbackQuery, state: FSMContext):
+    """Экран выбора платежной системы после указания срока тарифа"""
     await callback.answer()
     parts = callback.data.split("_")
     plan_type = parts[-2]
     days = int(parts[-1])
-    
     price = get_price(plan_type, days)
-    asset = config.PAYMENT_CURRENCY
-    await callback.message.edit_text("🔄 <i>Формирую счет, пожалуйста, подождите...</i>")
     
-    payload = f"{callback.from_user.id}:{plan_type}:{days}"
-    description = f"Оплата {config.BRAND_NAME}: {plan_type.upper()} на {days} дней"
+    # Сохраняем параметры выбора во временный кэш FSM-состояний
+    await state.update_data(plan_type=plan_type, days=days, price=price)
     
-    invoice = await cryptobot_client.create_invoice(amount=price, asset=asset, description=description, payload=payload)
+    text = (
+        f"💳 <b>Выбор метода оплаты подписки</b>\n\n"
+        f"• <b>Тариф:</b> {plan_type.upper()}\n"
+        f"• <b>Срок:</b> {days} дней\n"
+        f"• <b>Стоимость:</b> <code>{price}</code> {config.PAYMENT_CURRENCY}\n\n"
+        f"Выберите удобный для вас способ оплаты:"
+    )
+    kb = [
+        [InlineKeyboardButton(text="🪙 Оплатить Криптой (CryptoBot)", callback_data="pay_via_cryptobot")],
+        [InlineKeyboardButton(text="💳 Оплатить Картой (Lava.top)", callback_data="pay_via_lava")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_buy")]
+    ]
+    await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@user_router.callback_query(F.data == "pay_via_lava")
+async def cb_lava_email_request(callback: CallbackQuery, state: FSMContext):
+    """Запрос email для Lava.top (требование стр. 29 документации)"""
+    await callback.answer()
+    await state.set_state(LavaPaymentStates.wait_for_email)
+    await callback.message.edit_text(
+        text="📧 <b>Введите ваш Email для отправки чека:</b>\n\n"
+             "<i>Lava.top официально требует указать почту для формирования фискального платежа.</i>"
+    )
+
+@user_router.message(LavaPaymentStates.wait_for_email, F.text)
+async def msg_lava_process_email(message: Message, state: FSMContext):
+    """Валидация email и выставление динамического счета Lava.top"""
+    email = message.text.strip()
     
-    if invoice and invoice.get("bot_invoice_url"):
+    # Простейшая валидация регулярным выражением
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        await message.answer("❌ <b>Некорректный формат почты!</b> Пожалуйста, введите валидный email (например, client@gmail.com):")
+        return
+        
+    data = await state.get_data()
+    await state.clear() # Очищаем состояние
+    
+    plan_type, days, price = data["plan_type"], data["days"], data["price"]
+    await message.answer("🔄 <i>Формирую фиатный счет Lava.top, пожалуйста, подождите...</i>")
+    
+    from services.lava import lava_top_client
+    # Выставляем динамический счет Lava.top со страницы 5/29 документации
+    invoice = await lava_top_client.create_invoice(amount=price, client_email=email)
+    
+    if invoice and invoice.get("url"):
         kb = [
-            [InlineKeyboardButton(text="💳 Оплатить счет", url=invoice["bot_invoice_url"])],
-            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_invoice_{invoice['invoice_id']}")],
+            [InlineKeyboardButton(text="💳 Ссылка на оплату картой", url=invoice["url"])],
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_lava_{invoice['invoice_id']}_{plan_type}_{days}")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_buy")]
         ]
         text = (
-            f"🧾 <b>Счет успешно выставлен!</b>\n\n• <b>Тариф:</b> {plan_type.upper()}\n• <b>Срок:</b> {days} дней\n• <b>К оплате:</b> <code>{invoice['amount']}</code> {asset}\n\n"
-            f"Оплатите инвойс в @CryptoBot и нажмите «Проверить оплату»."
+            f"🧾 <b>Счет Lava.top успешно сформирован!</b>\n\n"
+            f"• <b>Тариф:</b> {plan_type.upper()}\n"
+            f"• <b>Срок:</b> {days} дней\n"
+            f"• <b>К оплате:</b> <code>{price}</code> RUB\n\n"
+            f"Оплатите покупку на открывшейся платежной форме Lava и нажмите «Проверить оплату»."
         )
-        await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        await message.answer(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     else:
-        await callback.message.edit_text(text="❌ Ошибка связи со шлюзом. Попробуйте позже.", reply_markup=get_main_menu_keyboard())
-
-# handlers/user.py — ЧАСТЬ 4.1 ИЗ 5
+        await message.answer(text="❌ Не удалось связаться с платежным шлюзом Lava.top. Попробуйте позже.", reply_markup=get_main_menu_keyboard())
 
 @user_router.callback_query(F.data == "menu_partner_gift")
 async def cb_menu_partner_gift(callback: CallbackQuery, db_session: AsyncSession):
