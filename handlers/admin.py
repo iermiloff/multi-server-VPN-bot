@@ -457,24 +457,40 @@ async def cb_adm_srv_sync_users(callback: CallbackQuery, db_session: AsyncSessio
     
     synced_count = 0
     xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
-    
+
     for sub in active_subs:
         try:
             existing_key = sub.keys[0] if (sub.keys and len(sub.keys) > 0) else None
             email = existing_key.client_email if existing_key else f"usr_{sub.user_id}_{uuid.uuid4().hex[:4]}"
             sub_id = existing_key.sub_id if existing_key else uuid.uuid4().hex
             
-            if next((k for k in sub.keys if k.server_id == server_id), None): continue
+            # 🔥 ИСПРАВЛЕНО: Прямой пуленепробиваемый запрос к базе вместо веры в кэш sub.keys
+            key_exists = await db_session.scalar(
+                select(func.count(VPNKey.id)).where(
+                    VPNKey.subscription_id == sub.id,
+                    VPNKey.server_id == server_id
+                )
+            ) or 0
+            
+            if key_exists > 0:
+                continue
+                
             target_inbounds = (base_inbound_ids + premium_inbound_ids) if sub.plan_type == SubscriptionType.PREMIUM else base_inbound_ids
-            if not target_inbounds: continue
+            if not target_inbounds: 
+                continue
             
             days_left = max(1, (sub.expires_at - now).days)
             if await xui.add_client(email=email, sub_id=sub_id, inbound_ids=target_inbounds, expires_days=days_left, plan_type=sub.plan_type):
                 db_session.add(VPNKey(subscription_id=sub.id, server_id=server_id, client_email=email, sub_id=sub_id, config_data=sub_id))
+                
+                # Выталкиваем в СУБД сразу, фиксируя состояние
+                await db_session.flush()
                 synced_count += 1
+                
         except Exception as push_err:
             logger.error(f"🚨 Ошибка наката реферала {sub.user_id}: {push_err}")
             continue
+
             
     await db_session.commit()
     await callback.message.answer(text=f"✅ <b>Синхронизация завершена!</b>\nНа ноду <code>{srv.name}</code> добавлено <b>{synced_count} активных клиентов</b>.")
