@@ -191,18 +191,23 @@ async def cb_menu_profile(callback: CallbackQuery, db_session: AsyncSession):
                 traffic_text = "📊 Трафик: <code>0.0 ГБ</code> (Подключения еще не созданы)\n"
             
             profile_text += traffic_text
-
             
-            for key in all_user_keys:
-                if key.server:
-                    srv = key.server
-                    clean_domain = urlparse(srv.api_url).hostname
-                    is_ip = clean_domain and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", clean_domain)
-                    protocol = "http" if is_ip else "https" if srv.api_url.startswith("https") else "http"
-                    dynamic_url = f"{protocol}://{clean_domain}:{srv.sub_port}/{srv.sub_path}/{key.sub_id}"
-                    profile_text += f"├ 🌍 <b>{key.server.name}:</b> <code>{dynamic_url}</code>\n"
+            if sub.keys:
+                for key in sub.keys:
+                    if key.server:
+                        srv = key.server
+                        clean_domain = urlparse(srv.api_url).hostname
+                        is_ip = clean_domain and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", clean_domain)
+                        
+                        protocol = "http" if is_ip else "https" if srv.api_url.startswith("https") else "http"
+                        dynamic_url = f"{protocol}://{clean_domain}:{srv.sub_port}/{srv.sub_path}/{key.sub_id}"
+                        
+                        profile_text += f"├ 🌍 <b>{key.server.name}:</b> <code>{dynamic_url}</code>\n"
+            else:
+                profile_text += "├ 🌍 <i>Доступы для этого тарифа еще не сгенерированы.</i>\n"
                     
-        profile_text += "\n💡 <i>Нажмите на код ссылки выше, чтобы скопировать.</i>"
+        profile_text += "\n💡 <i>Нажмите на код ссылки выше, чтобы скопировать её.</i>"
+
         
     try: await callback.message.edit_text(text=profile_text, reply_markup=get_profile_keyboard())
     except Exception: pass
