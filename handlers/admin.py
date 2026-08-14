@@ -258,11 +258,11 @@ async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session:
         active_end_date = active_subscription_object.expires_at
         expiry_timestamp = int(active_end_date.timestamp() * 1000)
         
-        # 🔥 ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Извлекаем старое имя или генерируем ОДНО новое ДО начала цикла серверов!
-        first_key = list(existing_keys.values()) if existing_keys else None
+        keys_list = list(existing_keys.values()) if existing_keys else []
+        first_key = keys_list[0] if (keys_list and len(channels_list if 'channels_list' in locals() else keys_list) > 0) else None
         shared_email = first_key.client_email if first_key else f"usr_{target_id}_{uuid.uuid4().hex[:4]}"
         shared_sub_id = first_key.sub_id if first_key else uuid.uuid4().hex
-        
+
         for srv in servers:
             try:
                 ib_stmt = select(TariffInbound).where(
