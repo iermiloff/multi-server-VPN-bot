@@ -290,6 +290,54 @@ async def cb_select_payment_method(callback: CallbackQuery, state: FSMContext):
     ]
     await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
+
+@user_router.callback_query(F.data == "pay_via_cryptobot")
+async def cb_pay_via_cryptobot_handler(callback: CallbackQuery, state: FSMContext):
+    """Генерация крипто-инвойса при выборе способа оплаты через CryptoBot"""
+    await callback.answer()
+    
+    # Извлекаем сохраненные на прошлом шаге данные из FSM-контекста
+    data = await state.get_data()
+    await state.clear()  # Очищаем состояние сцены
+    
+    if not data or "plan_type" not in data:
+        await callback.message.edit_text("❌ <b>Сессия оплаты истекла!</b> Пожалуйста, выберите тариф заново в меню покупки подписки.")
+        return
+        
+    plan_type, days, price = data["plan_type"], data["days"], data["price"]
+    asset = config.PAYMENT_CURRENCY  # Например, USDT или RUB в зависимости от конфига
+    
+    await callback.message.edit_text("🔄 <i>Формирую криптографический счет, пожалуйста, подождите...</i>")
+    
+    payload = f"{callback.from_user.id}:{plan_type}:{days}"
+    description = f"Оплата {config.BRAND_NAME}: тариф {plan_type.upper()} на {days} дней"
+    
+    # Вызываем наш рабочий клиент Crypto Pay API
+    invoice = await cryptobot_client.create_invoice(
+        amount=price, asset=asset, description=description, payload=payload
+    )
+    
+    if invoice and invoice.get("bot_invoice_url"):
+        kb = [
+            [InlineKeyboardButton(text="💳 Оплатить счет", url=invoice["bot_invoice_url"])],
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_invoice_{invoice['invoice_id']}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_buy")]
+        ]
+        text = (
+            f"🧾 <b>Счет успешно выставлен!</b>\n\n"
+            f"• <b>Тариф:</b> {plan_type.upper()}\n"
+            f"• <b>Срок:</b> {days} дней\n"
+            f"• <b>К оплате:</b> <code>{invoice['amount']}</code> {asset}\n\n"
+            f"Оплатите счет в @CryptoBot и нажмите «Проверить оплату»."
+        )
+        await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    else:
+        await callback.message.edit_text(
+            text="❌ Не удалось связаться со шлюзом @CryptoBot. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
 @user_router.callback_query(F.data == "pay_via_lava")
 async def cb_lava_email_request(callback: CallbackQuery, state: FSMContext):
     """Запрос email для Lava.top (требование стр. 29 документации)"""
