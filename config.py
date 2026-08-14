@@ -1,5 +1,5 @@
 # config.py
-from typing import List, Any
+from typing import List, Any, Optional
 from pydantic import SecretStr, BeforeValidator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
