@@ -17,6 +17,10 @@ from config import config
 from database.models import User, PartnerChannel, Subscription, VPNKey, Server, TariffInbound, SubscriptionType, PaymentLog
 from services.xui import XUIMultiClient
 from services.cryptobot import cryptobot_client
+from aiogram.fsm.state import StatesGroup, State
+class LavaPaymentStates(StatesGroup):
+    wait_for_email = State() 
+
 
 logger = logging.getLogger(__name__)
 user_router = Router()
