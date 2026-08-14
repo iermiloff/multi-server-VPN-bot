@@ -384,7 +384,6 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
 
     await callback.message.edit_text("⏳ <b>Платеж подтвержден!</b> Нарезаем доступы и рассчитываем партнерские награды...")
 
-# handlers/user.py — ЧАСТЬ 4.2 ИЗ 5
 
     is_premium = "PREMIUM" in callback.message.text
     plan_type = "premium" if is_premium else "base"
@@ -433,43 +432,99 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
                 try: await callback.bot.send_message(chat_id=referrer.telegram_id, text=f"🎁 <b>Реферальный бонус 1:1!</b> Твой друг купил тариф {plan_type.upper()} на {days} дней. Тебе начислено <b>{days} дней такого же тарифа в подарок!</b>")
                 except Exception: pass
 
-    db_session.add(PaymentLog(invoice_id=invoice_id, user_id=user_id, plan_type=plan_type, amount=price, ref_processed=True))
-    servers = (await db_session.execute(select(Server).where(Server.is_active == True))).scalars().all()
-    existing_keys = {k.server_id: k for k in (await db_session.execute(select(VPNKey).join(Subscription).where(Subscription.user_id == user_id))).scalars().all()}
+   db_session.add(PaymentLog(invoice_id=invoice_id, user_id=user_id, plan_type=plan_type, amount=price, ref_processed=True))
+
+    # 1. Загружаем все активные ноды сети 3x-ui
+    servers_res = await db_session.execute(select(Server).where(Server.is_active == True))
+    servers = servers_res.scalars().all()
+    
+    # 2. Ищем ключи, привязанные СТРОГО к текущей активируемой подписке
+    keys_stmt = select(VPNKey).where(VPNKey.subscription_id == active_sub_obj.id)
+    keys_res = await db_session.execute(keys_stmt)
+    existing_keys = {k.server_id: k for k in keys_res.scalars().all()}
+    
     expiry_timestamp = int(active_sub_obj.expires_at.timestamp() * 1000)
     
+    # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Генерируем ОДНО имя и ОДИН UUID подписки ДО начала цикла серверов!
+    # Если у пользователя уже был ключ в рамках этой подписки, забираем его данные
+    first_key = list(existing_keys.values())[0] if existing_keys else None
+    
+    shared_email = first_key.client_email if first_key else f"usr_{user_id}_{uuid.uuid4().hex[:4]}"
+    shared_sub_id = first_key.sub_id if first_key else uuid.uuid4().hex
 
     for srv in servers:
         try:
-            ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_(["base", "premium"] if (plan_type == "premium" or not is_pending_status) else ["base"]))
-            inbound_ids = [ib.inbound_id for ib in (await db_session.execute(ib_stmt)).scalars().all()]
+            # Срез портов xray под тариф пользователя
+            if plan_type == "premium" or not is_pending_status:
+                ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_(["base", "premium"]))
+            else:
+                ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type == "base")
+                
+            ib_res = await db_session.execute(ib_stmt)
+            inbound_ids = [ib.inbound_id for ib in ib_res.scalars().all()]
+            
             if not inbound_ids: 
-                continue
+                continue # На сервере нет портов под этот тариф — идем дальше
                 
             xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
             
-            if srv.id not in existing_keys:
-                email = f"usr_{user_id}_{uuid.uuid4().hex[:4]}"
-                sub_id = uuid.uuid4().hex
-                if await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days, plan_type=plan_type):
-                    db_session.add(VPNKey(subscription_id=active_sub_obj.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=sub_id))
-            else:
+            # СЦЕНАРИЙ А: Ключ на этой ноде уже существует (продление)
+            if srv.id in existing_keys:
                 current_key = existing_keys[srv.id]
                 target_bytes = (300 if plan_type == "premium" else 150) * 1024 * 1024 * 1024
+                
                 await xui.attach_client_inbounds(email=current_key.client_email, inbound_ids=inbound_ids)
                 res_get = await xui._request("GET", f"panel/api/clients/get/{current_key.client_email}")
+                
                 if res_get and res_get.get("success") and res_get.get("obj"):
                     p_data = res_get.get("obj")
-                    await xui._request("POST", f"panel/api/clients/update/{current_key.client_email}", json_data={"id": p_data.get("id"), "email": current_key.client_email, "totalGB": target_bytes, "expiryTime": expiry_timestamp, "subId": p_data.get("subId"), "limitIp": 3, "enable": True})
+                    payload_up = {
+                        "id": p_data.get("id"), "email": current_key.client_email, "totalGB": target_bytes, 
+                        "expiryTime": expiry_timestamp, "subId": p_data.get("subId"), "limitIp": 3, "enable": True
+                    }
+                    await xui._request("POST", f"panel/api/clients/update/{current_key.client_email}", json_data=payload_up)
                     await xui._request("POST", f"panel/api/clients/resetTraffic/{current_key.client_email}")
-        
-        except Exception as node_error:
-            logger.error(f"🚨 Ошибка связи с сервером {srv.name} при оплате: {node_error}")
+                    
+            # СЦЕНАРИЙ Б: Нарезка нового ключа на сервере (первичный пуш)
+            else:
+                days_left = max(1, (active_sub_obj.expires_at - now).days)
+                
+                # Пушим на панель НАШИ ЕДИНЫЕ ДАННЫЕ shared_email и shared_sub_id!
+                success = await xui.add_client(
+                    email=shared_email, sub_id=shared_sub_id, 
+                    inbound_ids=inbound_ids, expires_days=days_left, plan_type=plan_type
+                )
+                
+                if success:
+                    new_key_record = VPNKey(
+                        subscription_id=active_sub_obj.id, server_id=srv.id, 
+                        client_email=shared_email, sub_id=shared_sub_id, config_data=shared_sub_id
+                    )
+                    db_session.add(new_key_record)
+                    
+                    # Фиксируем в СУБД бота «на лету», исключая дубли при повторных кликах
+                    await db_session.flush()
+                    existing_keys[srv.id] = new_key_record
+                    
+        except Exception as e:
+            logger.error(f"🚨 Изолированный сбой ноды {srv.name} (ID: {srv.id}) при покупке: {e}")
             continue
 
-
+    # Финальный коммит всей пачки серверов в PostgreSQL
     await db_session.commit()
-    success_text = f"🎉 <b>Подписка успешно начислена!</b>\n\n• <b>Активирован тариф:</b> <code>{plan_type.upper()}</code>\n• <b>Добавлено времени:</b> <b>+{days} дней</b>\n• <b>Трафик:</b> <code>{300 if plan_type == 'premium' else 150} ГБ</code>\n\n💬 <i>Статус: {msg_alert} Все изменения сохранены. Нажмите кнопку ниже для перехода в меню.</i>"
-    try: await callback.message.edit_text(text=success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_to_main")]]))
-    except Exception: pass
-
+    
+    success_text = (
+        f"🎉 <b>Подписка успешно начислена!</b>\n\n"
+        f"• <b>Активирован тариф:</b> <code>{plan_type.upper()}</code>\n"
+        f"• <b>Добавлено времени:</b> <b>+{days} дней</b>\n"
+        f"• <b>Выделенный трафик:</b> <code>{300 if plan_type == 'premium' else 150} ГБ</code>\n\n"
+        f"💬 <i>Статус: {msg_alert} Все изменения синхронизированы на нодах. Нажмите кнопку ниже.</i>"
+    )
+    
+    try:
+        await callback.message.edit_text(
+            text=success_text, 
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_to_main")]])
+        )
+    except Exception:
+        pass
