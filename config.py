@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # Токены CryptoBot
     CRYPTO_BOT_TOKEN: SecretStr
     CRYPTO_BOT_NET: bool = False
+
+    #LAVA
+    LAVA_API_KEY: Optional[SecretStr] = None
+    LAVA_OFFER_ID: Optional[str] = None
     
     # Маркетинг платежей
     PRICE_BASE_1_MONTH: float = 5.0
