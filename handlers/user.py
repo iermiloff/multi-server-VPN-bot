@@ -449,27 +449,23 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
 
     db_session.add(PaymentLog(invoice_id=invoice_id, user_id=user_id, plan_type=plan_type, amount=price, ref_processed=True))
 
-    # 1. Загружаем все активные ноды сети 3x-ui
     servers_res = await db_session.execute(select(Server).where(Server.is_active == True))
     servers = servers_res.scalars().all()
+
+    any_user_key_stmt = select(VPNKey).join(Subscription).where(Subscription.user_id == user_id).limit(1)
+    any_user_key = (await db_session.execute(any_user_key_stmt)).scalar_one_or_none()
     
-    # 2. Ищем ключи, привязанные СТРОГО к текущей активируемой подписке
+    final_shared_email = any_user_key.client_email if any_user_key else f"usr_{user_id}_{uuid.uuid4().hex[:4]}"
+    final_shared_sub_id = any_user_key.sub_id if any_user_key else uuid.uuid4().hex
+    
     keys_stmt = select(VPNKey).where(VPNKey.subscription_id == active_sub_obj.id)
     keys_res = await db_session.execute(keys_stmt)
     existing_keys = {k.server_id: k for k in keys_res.scalars().all()}
     
     expiry_timestamp = int(active_sub_obj.expires_at.timestamp() * 1000)
-    
-    # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Генерируем ОДНО имя и ОДИН UUID подписки ДО начала цикла серверов!
-    # Если у пользователя уже был ключ в рамках этой подписки, забираем его данные
-    first_key = list(existing_keys.values())[0] if existing_keys else None
-    
-    shared_email = first_key.client_email if first_key else f"usr_{user_id}_{uuid.uuid4().hex[:4]}"
-    shared_sub_id = first_key.sub_id if first_key else uuid.uuid4().hex
 
     for srv in servers:
         try:
-            # Срез портов xray под тариф пользователя
             if plan_type == "premium" or not is_pending_status:
                 ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_(["base", "premium"]))
             else:
@@ -479,11 +475,10 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
             inbound_ids = [ib.inbound_id for ib in ib_res.scalars().all()]
             
             if not inbound_ids: 
-                continue # На сервере нет портов под этот тариф — идем дальше
+                continue
                 
             xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
             
-            # СЦЕНАРИЙ А: Ключ на этой ноде уже существует (продление)
             if srv.id in existing_keys:
                 current_key = existing_keys[srv.id]
                 target_bytes = (300 if plan_type == "premium" else 150) * 1024 * 1024 * 1024
@@ -499,25 +494,21 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
                     }
                     await xui._request("POST", f"panel/api/clients/update/{current_key.client_email}", json_data=payload_up)
                     await xui._request("POST", f"panel/api/clients/resetTraffic/{current_key.client_email}")
-                    
-            # СЦЕНАРИЙ Б: Нарезка нового ключа на сервере (первичный пуш)
             else:
                 days_left = max(1, (active_sub_obj.expires_at - now).days)
                 
-                # Пушим на панель НАШИ ЕДИНЫЕ ДАННЫЕ shared_email и shared_sub_id!
                 success = await xui.add_client(
-                    email=shared_email, sub_id=shared_sub_id, 
+                    email=final_shared_email, sub_id=final_shared_sub_id, 
                     inbound_ids=inbound_ids, expires_days=days_left, plan_type=plan_type
                 )
                 
                 if success:
                     new_key_record = VPNKey(
                         subscription_id=active_sub_obj.id, server_id=srv.id, 
-                        client_email=shared_email, sub_id=shared_sub_id, config_data=shared_sub_id
+                        client_email=final_shared_email, sub_id=final_shared_sub_id, config_data=final_shared_sub_id
                     )
                     db_session.add(new_key_record)
                     
-                    # Фиксируем в СУБД бота «на лету», исключая дубли при повторных кликах
                     await db_session.flush()
                     existing_keys[srv.id] = new_key_record
                     
@@ -525,7 +516,6 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
             logger.error(f"🚨 Изолированный сбой ноды {srv.name} (ID: {srv.id}) при покупке: {e}")
             continue
 
-    # Финальный коммит всей пачки серверов в PostgreSQL
     await db_session.commit()
     
     success_text = (
