@@ -172,84 +172,151 @@ async def cb_adm_crm_select_plan(callback: CallbackQuery, state: FSMContext):
 
 @admin_router.message(AdminCrmStates.wait_for_days_count)
 async def msg_adm_crm_save_days(message: Message, state: FSMContext, db_session: AsyncSession):
+    """Ручное начисление дней подписки из CRM админки с умной очередью тарифов"""
     if message.text.startswith("/"):
-        await state.clear(); await cmd_admin(message, db_session); return
-    try: days = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите целое число дней:"); return
+        await state.clear()
+        await cmd_admin(message, db_session)
+        return
         
-    data = await state.get_data(); await state.clear()
+    try:
+        days = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введите целое число дней:")
+        return
+ 
+    data = await state.get_data()
+    await state.clear()
+    
     target_id, plan_type = data["target_id"], data["plan_type"]
     now = datetime.datetime.utcnow()
     
-    base_sub = (await db_session.execute(select(Subscription).where(Subscription.user_id == target_id, Subscription.plan_type == SubscriptionType.BASE).order_by(Subscription.expires_at.desc()).limit(1))).scalar_one_or_none()
-    prem_sub = (await db_session.execute(select(Subscription).where(Subscription.user_id == target_id, Subscription.plan_type == SubscriptionType.PREMIUM).order_by(Subscription.expires_at.desc()).limit(1))).scalar_one_or_none()
+    # Извлекаем последние подписки пользователя для расчета заморозок
+    base_sub = (await db_session.execute(
+        select(Subscription)
+        .where(Subscription.user_id == target_id, Subscription.plan_type == SubscriptionType.BASE)
+        .order_by(Subscription.expires_at.desc()).limit(1)
+    )).scalar_one_or_none()
+    
+    prem_sub = (await db_session.execute(
+        select(Subscription)
+        .where(Subscription.user_id == target_id, Subscription.plan_type == SubscriptionType.PREMIUM)
+        .order_by(Subscription.expires_at.desc()).limit(1)
+    )).scalar_one_or_none()
     
     base_active = base_sub and base_sub.is_active and base_sub.expires_at > now and not base_sub.is_pending
     prem_active = prem_sub and prem_sub.is_active and prem_sub.expires_at > now and not prem_sub.is_pending
     msg_status = ""
 
+    # СЦЕНАРИЙ 1: Апгрейд подписки (Начисляем PREMIUM, замораживаем BASE в очередь)
     if plan_type == "premium" and base_active:
         base_sub.is_pending = True
-        if prem_sub: prem_sub.expires_at = now + datetime.timedelta(days=days); prem_sub.is_pending = False; prem_sub.is_active = True
-        else: prem_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.PREMIUM, expires_at=now + datetime.timedelta(days=days), is_pending=False); db_session.add(prem_sub)
+        if prem_sub:
+            prem_sub.expires_at = now + datetime.timedelta(days=days)
+            prem_sub.is_pending = False
+            prem_sub.is_active = True
+        else:
+            prem_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.PREMIUM, expires_at=now + datetime.timedelta(days=days), is_pending=False)
+            db_session.add(prem_sub)
         msg_status = "PREMIUM активирован! Базовый тариф заморожен в очередь."
+        
+    # СЦЕНАРИЙ 2: Даунгрейд подписки (Начисляем BASE при активном PREMIUM -> отправляем BASE в очередь)
     elif plan_type == "base" and prem_active:
         if base_sub:
-            if base_sub.is_pending: base_sub.expires_at += datetime.timedelta(days=days)
-            else: base_sub.expires_at = now + datetime.timedelta(days=days); base_sub.is_pending = True
-        else: base_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.BASE, expires_at=now + datetime.timedelta(days=days), is_pending=True); db_session.add(base_sub)
+            if base_sub.is_pending:
+                base_sub.expires_at += datetime.timedelta(days=days)
+            else:
+                base_sub.expires_at = now + datetime.timedelta(days=days)
+                base_sub.is_pending = True
+        else:
+            base_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.BASE, expires_at=now + datetime.timedelta(days=days), is_pending=True)
+            db_session.add(base_sub)
         msg_status = "PREMIUM активен. Новый базовый тариф убран в отложенную очередь."
+        
+    # СЦЕНАРИЙ 3: Прямое продление текущего активного или истекшего тарифа
     else:
         target_sub = prem_sub if plan_type == "premium" else base_sub
-        if target_sub and target_sub.expires_at > now and not target_sub.is_pending: target_sub.expires_at += datetime.timedelta(days=days)
+        if target_sub and target_sub.expires_at > now and not target_sub.is_pending:
+            target_sub.expires_at += datetime.timedelta(days=days)
         else:
-            if plan_type == "premium": prem_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.PREMIUM, expires_at=now + datetime.timedelta(days=days), is_pending=False); db_session.add(prem_sub)
-            else: base_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.BASE, expires_at=now + datetime.timedelta(days=days), is_pending=False); db_session.add(base_sub)
+            if plan_type == "premium":
+                prem_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.PREMIUM, expires_at=now + datetime.timedelta(days=days), is_pending=False)
+                db_session.add(prem_sub)
+            else:
+                base_sub = Subscription(user_id=target_id, plan_type=SubscriptionType.BASE, expires_at=now + datetime.timedelta(days=days), is_pending=False)
+                db_session.add(base_sub)
         msg_status = f"Успешное прямое продление тарифа {plan_type.upper()}."
 
     await db_session.flush()
     nodes_synced = 0
     active_subscription_object = prem_sub if (prem_sub and not prem_sub.is_pending and prem_sub.expires_at > now) else base_sub
     now_active_plan = active_subscription_object.plan_type if active_subscription_object else None
-    
+# handlers/admin.py — ОКОНЧАНИЕ ФУНКЦИИ msg_adm_crm_save_days
+
     if now_active_plan:
         servers = (await db_session.execute(select(Server).where(Server.is_active == True))).scalars().all()
         existing_keys = {k.server_id: k for k in (await db_session.execute(select(VPNKey).join(Subscription).where(Subscription.user_id == target_id))).scalars().all()}
         active_end_date = active_subscription_object.expires_at
         expiry_timestamp = int(active_end_date.timestamp() * 1000)
         
+        # 🔥 ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Извлекаем старое имя или генерируем ОДНО новое ДО начала цикла серверов!
+        first_key = list(existing_keys.values()) if existing_keys else None
+        shared_email = first_key.client_email if first_key else f"usr_{target_id}_{uuid.uuid4().hex[:4]}"
+        shared_sub_id = first_key.sub_id if first_key else uuid.uuid4().hex
+        
         for srv in servers:
             try:
-                ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_(["base", "premium"] if now_active_plan == SubscriptionType.PREMIUM else ["base"]))
+                ib_stmt = select(TariffInbound).where(
+                    TariffInbound.server_id == srv.id, 
+                    TariffInbound.plan_type.in_(["base", "premium"] if now_active_plan == SubscriptionType.PREMIUM else ["base"])
+                )
                 inbound_ids = [ib.inbound_id for ib in (await db_session.execute(ib_stmt)).scalars().all()]
-                if not inbound_ids: continue
+                if not inbound_ids: 
+                    continue
+                    
                 xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
                 
+                # Если ключа для этой подписки на сервере еще нет — создаем с нуля
                 if srv.id not in existing_keys:
-                    email = f"usr_{target_id}_{uuid.uuid4().hex[:4]}"
-                    sub_id = uuid.uuid4().hex
-                    if await xui.add_client(email=email, sub_id=sub_id, inbound_ids=inbound_ids, expires_days=days, plan_type=plan_type):
-                        protocol = "http" if srv.api_url.startswith("http") and "myepicpanel" not in srv.api_url else "https"
-                        db_session.add(VPNKey(subscription_id=active_subscription_object.id, server_id=srv.id, client_email=email, sub_id=sub_id, config_data=sub_id))
+                    # Передаем shared_email и shared_sub_id на все ноды
+                    if await xui.add_client(email=shared_email, sub_id=shared_sub_id, inbound_ids=inbound_ids, expires_days=days, plan_type=plan_type):
+                        new_crm_key = VPNKey(
+                            subscription_id=active_subscription_object.id, server_id=srv.id, 
+                            client_email=shared_email, sub_id=shared_sub_id, config_data=shared_sub_id
+                        )
+                        db_session.add(new_crm_key)
+                        
+                        # Мгновенно выталкиваем в СУБД, обновляя словарь для блокировки дубликатов
+                        await db_session.flush()
+                        existing_keys[srv.id] = new_crm_key
                         nodes_synced += 1
                 else:
+                    # Если ключ уже был (продление текущего тарифа), просто обновляем лимиты и время
                     current_key = existing_keys[srv.id]
                     target_bytes = (300 if now_active_plan == SubscriptionType.PREMIUM else 150) * 1024 * 1024 * 1024
+                    
                     await xui.attach_client_inbounds(email=current_key.client_email, inbound_ids=inbound_ids)
                     res_get = await xui._request("GET", f"panel/api/clients/get/{current_key.client_email}")
+                    
                     if res_get and res_get.get("success") and res_get.get("obj"):
                         p_data = res_get.get("obj")
-                        await xui._request("POST", f"panel/api/clients/update/{current_key.client_email}", json_data={"id": p_data.get("id"), "email": current_key.client_email, "totalGB": target_bytes, "expiryTime": expiry_timestamp, "subId": p_data.get("subId"), "limitIp": 3, "enable": True})
+                        payload_up = {
+                            "id": p_data.get("id"), "email": current_key.client_email, "totalGB": target_bytes, 
+                            "expiryTime": expiry_timestamp, "subId": p_data.get("subId"), "limitIp": 3, "enable": True
+                        }
+                        await xui._request("POST", f"panel/api/clients/update/{current_key.client_email}", json_data=payload_up)
                         await xui._request("POST", f"panel/api/clients/resetTraffic/{current_key.client_email}")
+                    else:
+                        await xui.update_client_expiry(current_key.client_email, expiry_time=expiry_timestamp)
                     nodes_synced += 1
+                    
             except Exception as srv_err:
-                logger.error(f"🚨 Сбой пуша на ноду {srv.name}: {srv_err}")
+                logger.error(f"🚨 Сбой ручного пуша на ноду {srv.name} (ID: {srv.id}): {srv_err}")
                 continue
 
     await db_session.commit()
-    await message.answer(text=f"⚡ <b>Синхронизация завершена!</b>\n\n• Начислено: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n• Статус: {msg_status}\n• Синхронизировано нод: <b>{nodes_synced} шт.</b>")
+    await message.answer(text=f"👑 <b>Синхронизация завершена!</b>\n\n• Начислено: <code>{plan_type.upper()}</code> на <b>{days} дн.</b>\n• Статус: <i>{msg_status}</i>\n• Синхронизировано нод: <b>{nodes_synced} шт.</b>")
     await render_user_card(message, db_session, target_id)
+
 
 @admin_router.callback_query(F.data.startswith("adm_crm_wipe_subs_"))
 async def cb_adm_crm_wipe_subs(callback: CallbackQuery, db_session: AsyncSession):
