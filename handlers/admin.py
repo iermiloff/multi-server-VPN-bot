@@ -439,7 +439,7 @@ async def cb_adm_srv_manage(callback: CallbackQuery, db_session: AsyncSession):
 
 @admin_router.callback_query(F.data.startswith("adm_srv_sync_users_"))
 async def cb_adm_srv_sync_users(callback: CallbackQuery, db_session: AsyncSession):
-    """Массовый накат всех действующих клиентов бота на новую ноду в 1 клик"""
+    """Массовый накат клиентов на новую ноду с абсолютной защитой по user_id"""
     await callback.answer()
     server_id = int(callback.data.split("_")[-1])
     now = datetime.datetime.utcnow()
@@ -450,31 +450,39 @@ async def cb_adm_srv_sync_users(callback: CallbackQuery, db_session: AsyncSessio
     base_inbound_ids = [ib.inbound_id for ib in db_inbounds if ib.plan_type == "base"]
     premium_inbound_ids = [ib.inbound_id for ib in db_inbounds if ib.plan_type == "premium"]
     if not base_inbound_ids and not premium_inbound_ids:
-        await callback.message.answer("⚠️ Сначала настройте тарифы портов xray ниже!", show_alert=True); return
+        await callback.message.answer("⚠️ Сначала настройте тарифы портов xray ниже!", show_alert=True)
+        return
         
     await callback.message.edit_text(f"⏳ <b>Массовая синхронизация...</b>\nНакатываем базу на ноду <code>{srv.name}</code>.")
-    active_subs = (await db_session.execute(select(Subscription).where(Subscription.is_active == True, Subscription.is_pending == False, Subscription.expires_at > now).options(selectinload(Subscription.keys)))).scalars().all()
+    
+    active_subs = (await db_session.execute(select(Subscription).where(
+        Subscription.is_active == True, Subscription.is_pending == False, Subscription.expires_at > now
+    ).options(selectinload(Subscription.keys)))).scalars().all()
     
     synced_count = 0
     xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
-
+    
     for sub in active_subs:
         try:
-            existing_key = sub.keys[0] if (sub.keys and len(sub.keys) > 0) else None
-            email = existing_key.client_email if existing_key else f"usr_{sub.user_id}_{uuid.uuid4().hex[:4]}"
-            sub_id = existing_key.sub_id if existing_key else uuid.uuid4().hex
-            
-            # 🔥 ИСПРАВЛЕНО: Прямой пуленепробиваемый запрос к базе вместо веры в кэш sub.keys
+            # 🔥 ЖЕСТКАЯ ПРОВЕРКА ПО ВСЕЙ ТАБЛИЦЕ КЛЮЧЕЙ:
+            # Ищем, есть ли у этого конкретного пользователя (sub.user_id) ХОТЬ ОДИН ключ на ЭТОМ сервере (server_id)
             key_exists = await db_session.scalar(
-                select(func.count(VPNKey.id)).where(
-                    VPNKey.subscription_id == sub.id,
+                select(func.count(VPNKey.id))
+                .join(Subscription)
+                .where(
+                    Subscription.user_id == sub.user_id,
                     VPNKey.server_id == server_id
                 )
             ) or 0
             
+            # Если у пользователя уже нарезан доступ на этой ноде — намертво пропускаем его, исключая дубли!
             if key_exists > 0:
                 continue
                 
+            existing_key = sub.keys[0] if (sub.keys and len(sub.keys) > 0) else None
+            email = existing_key.client_email if existing_key else f"usr_{sub.user_id}_{uuid.uuid4().hex[:4]}"
+            sub_id = existing_key.sub_id if existing_key else uuid.uuid4().hex
+            
             target_inbounds = (base_inbound_ids + premium_inbound_ids) if sub.plan_type == SubscriptionType.PREMIUM else base_inbound_ids
             if not target_inbounds: 
                 continue
@@ -483,17 +491,16 @@ async def cb_adm_srv_sync_users(callback: CallbackQuery, db_session: AsyncSessio
             if await xui.add_client(email=email, sub_id=sub_id, inbound_ids=target_inbounds, expires_days=days_left, plan_type=sub.plan_type):
                 db_session.add(VPNKey(subscription_id=sub.id, server_id=server_id, client_email=email, sub_id=sub_id, config_data=sub_id))
                 
-                # Выталкиваем в СУБД сразу, фиксируя состояние
+                # Мгновенно выталкиваем транзакцию в СУБД, чтобы count() при следующем шаге увидел запись
                 await db_session.flush()
                 synced_count += 1
                 
         except Exception as push_err:
-            logger.error(f"🚨 Ошибка наката реферала {sub.user_id}: {push_err}")
+            logger.error(f"🚨 Ошибка наката реферала {sub.user_id} на ноду {server_id}: {push_err}")
             continue
-
             
     await db_session.commit()
-    await callback.message.answer(text=f"✅ <b>Синхронизация завершена!</b>\nНа ноду <code>{srv.name}</code> добавлено <b>{synced_count} активных клиентов</b>.")
+    await callback.message.answer(text=f"✅ <b>Синхронизация завершена!</b>\nНа ноду <code>{srv.name}</code> добавлено <b>{synced_count} клиентов</b>.")
     await cb_adm_srv_manage(callback, db_session)
 
 @admin_router.callback_query(F.data.startswith("adm_crm_toggle_pro_"))
