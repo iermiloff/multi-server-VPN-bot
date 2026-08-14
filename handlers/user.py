@@ -582,3 +582,127 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
         )
     except Exception:
         pass
+
+# handlers/user.py — ХЕНДЛЕР ПУЛЛИНГА СТАТУСА LAVA.TOP С ФИНАЛЬНЫМ НАЧИСЛЕНИЕМ ТАРИФА
+
+@user_router.callback_query(F.data.startswith("check_lava_"))
+async def cb_check_lava_pull(callback: CallbackQuery, db_session: AsyncSession):
+    """Ручная проверка статуса фиатного счета Lava.top по кнопке пользователя"""
+    parts = callback.data.split("_")
+    invoice_id = parts[2]
+    plan_type = parts[3]
+    days = int(parts[4])
+    user_id = callback.from_user.id
+    
+    # 1. Защита FOR UPDATE от Race Condition (двойных кликов)
+    stmt_lock = select(PaymentLog).where(PaymentLog.invoice_id == int(hash(invoice_id) & 0x7fffffff)).with_for_update()
+    if (await db_session.execute(stmt_lock)).scalar_one_or_none():
+        await callback.answer("✅ Эта покупка уже успешно зачислена!", show_alert=True)
+        return
+
+    from services.lava import lava_top_client
+    # Получаем живой статус со стр. 26 документации Lava.top (NEW, IN_PROGRESS, COMPLETED, FAILED)
+    status = await lava_top_client.get_invoice_status(invoice_id)
+    
+    if not status:
+        await callback.answer("⚠️ Не удалось получить статус счета от Lava.top. Попробуйте снова.", show_alert=True)
+        return
+    if status in ("NEW", "IN_PROGRESS"):
+        await callback.answer("⏳ Оплата еще не поступила! Оплатите счет на форме Lava и нажмите кнопку снова.", show_alert=True)
+        return
+    if status == "FAILED":
+        await callback.message.edit_text("❌ Платеж отклонен или просрочен. Пожалуйста, создайте новый счет.")
+        return
+
+    # --- СТАТУС СТРОГО "COMPLETED" (УСПЕШНАЯ ФИАТНАЯ ОПЛАТА) ---
+    await callback.message.edit_text("⏳ <b>Фиатный платеж подтвержден!</b> Нарезаем доступы...")
+    
+    price = get_price(plan_type, days)
+    now = datetime.datetime.utcnow()
+    user = (await db_session.execute(select(User).where(User.telegram_id == user_id).options(selectinload(User.subscriptions)))).scalar_one()
+
+    # (Ниже идет наш стандартный, пуленепробиваемый алгоритм очередей, гибридной рефералки и flush нод Xray)
+    base_active = any(s.plan_type == "base" and s.is_active and s.expires_at > now and not s.is_pending for s in user.subscriptions)
+    target_sub = next((s for s in user.subscriptions if s.plan_type == plan_type), None)
+    is_pending_status = False
+    
+    if plan_type == "premium" and base_active:
+        for s in user.subscriptions:
+            if s.plan_type == "base": s.is_pending = True
+        msg_alert = f"Тариф PREMIUM на {days} дней активирован! База убрана в очередь."
+    else:
+        is_pending_status = any(s.is_active and s.expires_at > now and not s.is_pending for s in user.subscriptions if s.plan_type != plan_type)
+        msg_alert = f"Тариф {plan_type.upper()} продлен на {days} дней."
+
+    if target_sub:
+        if target_sub.is_active and target_sub.expires_at > now and not target_sub.is_pending: target_sub.expires_at += datetime.timedelta(days=days)
+        else: target_sub.expires_at = now + datetime.timedelta(days=days); target_sub.is_pending = is_pending_status; target_sub.is_active = True
+        active_sub_obj = target_sub
+    else:
+        new_sub = Subscription(user_id=user_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days), is_pending=is_pending_status)
+        db_session.add(new_sub); active_sub_obj = new_sub
+
+    await db_session.flush()
+    
+    # Сплит гибридной партнерки (Пожизненный доход PRO и одноразовый для обычных друзей)
+    past_payments = await db_session.scalar(select(func.count(PaymentLog.id)).where(PaymentLog.user_id == user_id)) or 0
+    if user.referred_by:
+        referrer = (await db_session.execute(select(User).where(User.telegram_id == user.referred_by).options(selectinload(User.subscriptions)))).scalar_one_or_none()
+        if referrer:
+            if referrer.is_pro_ref:
+                referrer.partner_balance_usd += (price * 0.10)
+                try: await callback.bot.send_message(chat_id=referrer.telegram_id, text=f"👑 <b>PRO-Начисление!</b> Твой реферал оплатил тариф {plan_type.upper()} через карту.\nТебе зачислено: <b>${price * 0.10:.2f}</b>")
+                except Exception: pass
+            elif past_payments == 0:
+                ref_target_sub = next((s for s in referrer.subscriptions if s.plan_type == plan_type), None)
+                if ref_target_sub:
+                    if ref_target_sub.is_active and ref_target_sub.expires_at > now: ref_target_sub.expires_at += datetime.timedelta(days=days)
+                    else: ref_target_sub.expires_at = now + datetime.timedelta(days=days); ref_target_sub.is_active = True
+                else: db_session.add(Subscription(user_id=referrer.telegram_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days)))
+                try: await callback.bot.send_message(chat_id=referrer.telegram_id, text=f"🎁 <b>Реферальный бонус 1:1!</b> Твой друг купил тариф {plan_type.upper()}. Тебе начислено <b>{days} дней в подарок!</b>")
+                except Exception: pass
+
+    # Фиксируем лог фиатной транзакции
+    fake_int_id = int(hash(invoice_id) & 0x7fffffff)
+    db_session.add(PaymentLog(invoice_id=fake_int_id, user_id=user_id, plan_type=plan_type, amount=price, ref_processed=True))
+
+    # Каскадный пуш на ноды Xray с единым shared_email
+    servers = (await db_session.execute(select(Server).where(Server.is_active == True))).scalars().all()
+    any_user_key = (await db_session.execute(select(VPNKey).join(Subscription).where(Subscription.user_id == user_id).limit(1))).scalar_one_or_none()
+    final_shared_email = any_user_key.client_email if any_user_key else f"usr_{user_id}_{uuid.uuid4().hex[:4]}"
+    final_shared_sub_id = any_user_key.sub_id if any_user_key else uuid.uuid4().hex
+    
+    existing_keys = {k.server_id: k for k in (await db_session.execute(select(VPNKey).where(VPNKey.subscription_id == active_sub_obj.id))).scalars().all()}
+    expiry_timestamp = int(active_sub_obj.expires_at.timestamp() * 1000)
+    
+    for srv in servers:
+        try:
+            ib_stmt = select(TariffInbound).where(TariffInbound.server_id == srv.id, TariffInbound.plan_type.in_(["base", "premium"] if (plan_type == "premium" or not is_pending_status) else ["base"]))
+            inbound_ids = [ib.inbound_id for ib in (await db_session.execute(ib_stmt)).scalars().all()]
+            if not inbound_ids: continue
+            
+            xui = XUIMultiClient(api_url=srv.api_url, api_token=srv.api_token)
+            if srv.id in existing_keys:
+                current_key = existing_keys[srv.id]
+                target_bytes = (300 if plan_type == "premium" else 150) * 1024 * 1024 * 1024
+                await xui.attach_client_inbounds(email=current_key.client_email, inbound_ids=inbound_ids)
+                res_get = await xui._request("GET", f"panel/api/clients/get/{current_key.client_email}")
+                if res_get and res_get.get("success") and res_get.get("obj"):
+                    p_data = res_get.get("obj")
+                    await xui._request("POST", f"panel/api/clients/update/{current_key.client_email}", json_data={"id": p_data.get("id"), "email": current_key.client_email, "totalGB": target_bytes, "expiryTime": expiry_timestamp, "subId": p_data.get("subId"), "limitIp": 3, "enable": True})
+                    await xui._request("POST", f"panel/api/clients/resetTraffic/{current_key.client_email}")
+            else:
+                days_left = max(1, (active_sub_obj.expires_at - now).days)
+                if await xui.add_client(email=final_shared_email, sub_id=final_shared_sub_id, inbound_ids=inbound_ids, expires_days=days_left, plan_type=plan_type):
+                    new_key_record = VPNKey(subscription_id=active_sub_obj.id, server_id=srv.id, client_email=final_shared_email, sub_id=final_shared_sub_id, config_data=final_shared_sub_id)
+                    db_session.add(new_key_record)
+                    await db_session.flush()
+                    existing_keys[srv.id] = new_key_record
+        except Exception as e:
+            logger.error(f"🚨 Сбой ноды {srv.name} при оплате Lava: {e}")
+            continue
+
+    await db_session.commit()
+    success_text = f"🎉 <b>Подписка успешно начислена через карту!</b>\n\n• <b>Активирован тариф:</b> <code>{plan_type.upper()}</code>\n• <b>Добавлено времени:</b> <b>+{days} дней</b>\n\n💬 <i>Статус: {msg_alert} Нажмите кнопку ниже для возврата.</i>"
+    try: await callback.message.edit_text(text=success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_to_main")]]))
+    except Exception: pass
