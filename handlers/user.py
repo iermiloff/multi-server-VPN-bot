@@ -415,21 +415,37 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
     await db_session.flush()
     past_payments = await db_session.scalar(select(func.count(PaymentLog.id)).where(PaymentLog.user_id == user_id)) or 0
     
-    if past_payments == 0 and user.referred_by:
+    if user.referred_by:
         referrer = (await db_session.execute(select(User).where(User.telegram_id == user.referred_by).options(selectinload(User.subscriptions)))).scalar_one_or_none()
+        
         if referrer:
             if referrer.is_pro_ref:
                 referrer.partner_balance_usd += (price * 0.10)
-                try: await callback.bot.send_message(chat_id=referrer.telegram_id, text=f"👑 <b>PRO-Начисление!</b> Твой реферал купил {plan_type.upper()}.\nТебе начислено: <b>${price * 0.10:.2f}</b>")
+                try: 
+                    await callback.bot.send_message(
+                        chat_id=referrer.telegram_id, 
+                        text=f"👑 <b>PRO-Начисление!</b> Твой реферал совершил оплату тарифа {plan_type.upper()}.\nТебе зачислено: <b>${price * 0.10:.2f}</b>"
+                    )
                 except Exception: pass
+
             else:
-                ref_target_sub = next((s for s in referrer.subscriptions if s.plan_type == plan_type), None)
-                if ref_target_sub:
-                    if ref_target_sub.is_active and ref_target_sub.expires_at > now: ref_target_sub.expires_at += datetime.timedelta(days=days)
-                    else: ref_target_sub.expires_at = now + datetime.timedelta(days=days); ref_target_sub.is_active = True
-                else: db_session.add(Subscription(user_id=referrer.telegram_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days)))
-                try: await callback.bot.send_message(chat_id=referrer.telegram_id, text=f"🎁 <b>Реферальный бонус 1:1!</b> Твой друг купил тариф {plan_type.upper()} на {days} дней. Тебе начислено <b>{days} дней в подарок!</b>")
-                except Exception: pass
+                if past_payments == 0:
+                    ref_target_sub = next((s for s in referrer.subscriptions if s.plan_type == plan_type), None)
+                    if ref_target_sub:
+                        if ref_target_sub.is_active and ref_target_sub.expires_at > now: 
+                            ref_target_sub.expires_at += datetime.timedelta(days=days)
+                        else: 
+                            ref_target_sub.expires_at = now + datetime.timedelta(days=days)
+                            ref_target_sub.is_active = True
+                    else: 
+                        db_session.add(Subscription(user_id=referrer.telegram_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days)))
+                    
+                    try: 
+                        await callback.bot.send_message(
+                            chat_id=referrer.telegram_id, 
+                            text=f"🎁 <b>Реферальный бонус 1:1!</b> Твой друг купил тариф {plan_type.upper()} на {days} дней. Тебе начислено <b>{days} дней такого же тарифа в подарок!</b>"
+                        )
+                    except Exception: pass
 
     db_session.add(PaymentLog(invoice_id=invoice_id, user_id=user_id, plan_type=plan_type, amount=price, ref_processed=True))
 
