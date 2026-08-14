@@ -384,7 +384,6 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
 
     await callback.message.edit_text("⏳ <b>Платеж подтвержден!</b> Нарезаем доступы и рассчитываем партнерские награды...")
 
-
     is_premium = "PREMIUM" in callback.message.text
     plan_type = "premium" if is_premium else "base"
     days = 180 if "180" in callback.message.text else 90 if "90" in callback.message.text else 30
@@ -400,7 +399,7 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
     if plan_type == "premium" and base_active:
         for s in user.subscriptions:
             if s.plan_type == "base": s.is_pending = True
-        msg_alert = f"Тариф PREMIUM на {days} дней активирован! База временно убрана в очередь."
+        msg_alert = f"Тариф PREMIUM на {days} дней успешно активирован! Ваша База временно убрана в очередь."
     else:
         is_pending_status = any(s.is_active and s.expires_at > now and not s.is_pending for s in user.subscriptions if s.plan_type != plan_type)
         msg_alert = f"Тариф {plan_type.upper()} продлен на {days} дней."
@@ -429,10 +428,10 @@ async def cb_check_invoice_pull(callback: CallbackQuery, db_session: AsyncSessio
                     if ref_target_sub.is_active and ref_target_sub.expires_at > now: ref_target_sub.expires_at += datetime.timedelta(days=days)
                     else: ref_target_sub.expires_at = now + datetime.timedelta(days=days); ref_target_sub.is_active = True
                 else: db_session.add(Subscription(user_id=referrer.telegram_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days)))
-                try: await callback.bot.send_message(chat_id=referrer.telegram_id, text=f"🎁 <b>Реферальный бонус 1:1!</b> Твой друг купил тариф {plan_type.upper()} на {days} дней. Тебе начислено <b>{days} дней такого же тарифа в подарок!</b>")
+                try: await callback.bot.send_message(chat_id=referrer.telegram_id, text=f"🎁 <b>Реферальный бонус 1:1!</b> Твой друг купил тариф {plan_type.upper()} на {days} дней. Тебе начислено <b>{days} дней в подарок!</b>")
                 except Exception: pass
 
-   db_session.add(PaymentLog(invoice_id=invoice_id, user_id=user_id, plan_type=plan_type, amount=price, ref_processed=True))
+    db_session.add(PaymentLog(invoice_id=invoice_id, user_id=user_id, plan_type=plan_type, amount=price, ref_processed=True))
 
     # 1. Загружаем все активные ноды сети 3x-ui
     servers_res = await db_session.execute(select(Server).where(Server.is_active == True))
