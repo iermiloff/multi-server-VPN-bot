@@ -81,19 +81,65 @@ async def cb_admin_main_menu(callback: CallbackQuery, db_session: AsyncSession):
     await callback.answer()
     await callback.message.edit_text(text=await get_admin_dashboard_text(db_session), reply_markup=get_admin_main_keyboard())
 
-@admin_router.callback_query(F.data == "adm_crm_menu")
+
+@admin_router.callback_query(F.data.startswith("adm_crm_menu"))
 async def cb_adm_crm_menu(callback: CallbackQuery, db_session: AsyncSession):
+    """Постраничное отображение базы пользователей для удобного администрирования"""
     await callback.answer()
-    res = await db_session.execute(select(User).order_by(User.registered_at.desc()).limit(10))
+    
+    # Парсим номер страницы из callback_data (если суффикса нет — открываем страницу 0)
+    parts = callback.data.split("_")
+    page = int(parts[-1]) if parts[-1].isdigit() else 0
+    
+    limit = 5  # Выводим аккуратно по 5 человек, чтобы кнопки не слипались
+    offset = page * limit
+    
+    # Считаем общее количество живых клиентов в базе данных
+    total_users = await db_session.scalar(select(func.count(User.telegram_id))) or 0
+    total_pages = (total_users + limit - 1) // limit
+    
+    # Делаем выборку среза пользователей под текущую страницу
+    res = await db_session.execute(
+        select(User)
+        .order_by(User.registered_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
     users = res.scalars().all()
-    text = "👥 <b>CRM: Управление пользователями</b>\n\nПоследние клиенты:\n"
+    
+    text = (
+        f"👥 <b>CRM: Управление пользователями</b>\n"
+        f"📋 Страница: <code>{page + 1}</code> из <code>{max(1, total_pages)}</code>\n"
+        f"📊 Всего клиентов в СУБД: <code>{total_users}</code>\n\n"
+        f"Последние зарегистрированные аккаунты:"
+    )
+    
     kb = []
     for u in users:
-        u_str = f"(@{u.username})" if u.username else ""
-        text += f"• <code>{u.telegram_id}</code> {u_str}\n"
-        kb.append([InlineKeyboardButton(text=f"⚙️ Управлять {u.telegram_id}", callback_data=f"adm_user_card_{u.telegram_id}")])
-    kb.append([InlineKeyboardButton(text="🔍 Поиск по ID", callback_data="adm_user_search_start"), InlineKeyboardButton(text="◀️ Меню", callback_data="adm_main_menu")])
-    await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        u_str = f" (@{u.username})" if u.username else " (нет юзернейма)"
+        kb.append([InlineKeyboardButton(text=f"⚙️ {u.telegram_id}{u_str}", callback_data=f"adm_user_card_{u.telegram_id}")])
+    
+    # Навигационный ряд стрелочек (появляются автоматически в зависимости от размера базы)
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm_crm_menu_{page - 1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"adm_crm_menu_{page + 1}"))
+        
+    if nav_row:
+        kb.append(nav_row)
+        
+    # Кнопки поиска и возврата в главное меню админки
+    kb.append([
+        InlineKeyboardButton(text="🔍 Поиск по ID", callback_data="adm_user_search_start"), 
+        InlineKeyboardButton(text="◀️ Меню", callback_data="adm_main_menu")
+    ])
+    
+    try:
+        await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    except Exception:
+        pass
+
 
 @admin_router.callback_query(F.data == "adm_user_search_start")
 async def cb_adm_user_search_start(callback: CallbackQuery, state: FSMContext):
