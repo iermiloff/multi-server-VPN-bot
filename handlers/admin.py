@@ -74,27 +74,40 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     ])
 # handlers/admin.py — ХЕНДЛЕР ПАРТНЕРСКОГО КАБИНЕТА ДЛЯ АДМИНИСТРАЦИИ
 
+# handlers/admin.py — БЕЗОПАСНЫЙ ХЕНДЛЕР С АВТОРЕГИСТРАЦИЕЙ АДМИНИСТРАТОРА
+
 @admin_router.callback_query(F.data == "adm_my_ref_link")
 async def cb_adm_my_ref_link(callback: CallbackQuery, db_session: AsyncSession):
-    """Вывод партнерского кабинета менеджера/админа прямо внутри админ-панели"""
+    """Вывод партнерской ссылки менеджера/админа с авторегистрацией в СУБД"""
     await callback.answer()
     user_id = callback.from_user.id
     
-    # 1. Загружаем данные админа из СУБД, подтягивая счетчики
+    # 1. Загружаем данные админа из СУБД
     user = (await db_session.execute(
         select(User).where(User.telegram_id == user_id)
     )).scalar_one_or_none()
     
-    # Считаем, сколько человек зарегистрировалось по ссылке этого менеджера
+    # ИСПРАВЛЕНО: Если админа нет в таблице users, регистрируем его на лету!
+    if not user:
+        user = User(
+            telegram_id=user_id,
+            username=callback.from_user.username,
+            referred_by=None,
+            registered_at=datetime.datetime.utcnow()
+        )
+        db_session.add(user)
+        await db_session.flush()  # Мгновенно выталкиваем в память сессии
+    
+    # Считаем рефералов менеджера
     ref_count = await db_session.scalar(
         select(func.count(User.telegram_id)).where(User.referred_by == user_id)
     ) or 0
     
-    # 2. Формируем реферальную ссылку (подхватываем юзернейм бота из конфига)
+    # Сборка ссылки
     bot_res = await callback.bot.get_me()
     ref_link = f"https://t.me{bot_res.username}?start=ref{user_id}"
     
-    # 3. Проверяем тип партнерки менеджера (по умолчанию админам лучше сразу выводить PRO-статус)
+    # Проверка статуса (теперь ошибка NoneType полностью невозможна)
     ref_status = "👑 PRO-Партнер (10% CPA в USD)" if user.is_pro_ref else "👥 Обычный (1:1 бонусные дни)"
     wallet_str = f"<code>{user.crypto_wallet}</code>" if user.crypto_wallet else "<i>не привязан</i>"
     
@@ -106,9 +119,8 @@ async def cb_adm_my_ref_link(callback: CallbackQuery, db_session: AsyncSession):
         f"• <b>Выплатной TON-кошелек:</b> {wallet_str}\n\n"
         f"📋 <b>Твоя персональная ссылка для привлечения клиентов:</b>\n"
         f"<code>{ref_link}</code>\n\n"
-        f"💡 <i>Нажмите на ссылку выше, чтобы скопировать её. Вы можете передавать её блогерам, "
-        f"закупать на неё рекламу или делиться с друзьями. Все переходы и оплаты будут "
-        f"жестко фиксироваться за вашим ID!</i>"
+        f"💡 <i>Нажмите на ссылку выше, чтобы скопировать её. Все переходы и оплаты будут "
+        f"фиксироваться за вашим ID!</i>"
     )
     
     kb = [[InlineKeyboardButton(text="◀️ Назад в админку", callback_data="adm_main_menu")]]
