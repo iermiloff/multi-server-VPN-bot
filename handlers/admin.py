@@ -69,8 +69,54 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="👥 Управление пользователями (CRM)", callback_data="adm_crm_menu")],
         [InlineKeyboardButton(text="💰 Выгрузить выплаты (Pro)", callback_data="adm_ref_payouts_list")],
         [InlineKeyboardButton(text="🖥 Управление серверами 3x-ui", callback_data="adm_servers_list")],
+        [InlineKeyboardButton(text="🔗 Моя партнерская ссылка", callback_data="adm_my_ref_link")],
         [InlineKeyboardButton(text="📢 Настройка каналов и спонсоров", callback_data="adm_partners_list")]
     ])
+# handlers/admin.py — ХЕНДЛЕР ПАРТНЕРСКОГО КАБИНЕТА ДЛЯ АДМИНИСТРАЦИИ
+
+@admin_router.callback_query(F.data == "adm_my_ref_link")
+async def cb_adm_my_ref_link(callback: CallbackQuery, db_session: AsyncSession):
+    """Вывод партнерского кабинета менеджера/админа прямо внутри админ-панели"""
+    await callback.answer()
+    user_id = callback.from_user.id
+    
+    # 1. Загружаем данные админа из СУБД, подтягивая счетчики
+    user = (await db_session.execute(
+        select(User).where(User.telegram_id == user_id)
+    )).scalar_one_or_none()
+    
+    # Считаем, сколько человек зарегистрировалось по ссылке этого менеджера
+    ref_count = await db_session.scalar(
+        select(func.count(User.telegram_id)).where(User.referred_by == user_id)
+    ) or 0
+    
+    # 2. Формируем реферальную ссылку (подхватываем юзернейм бота из конфига)
+    bot_res = await callback.bot.get_me()
+    ref_link = f"https://t.me{bot_res.username}?start=ref{user_id}"
+    
+    # 3. Проверяем тип партнерки менеджера (по умолчанию админам лучше сразу выводить PRO-статус)
+    ref_status = "👑 PRO-Партнер (10% CPA в USD)" if user.is_pro_ref else "👥 Обычный (1:1 бонусные дни)"
+    wallet_str = f"<code>{user.crypto_wallet}</code>" if user.crypto_wallet else "<i>не привязан</i>"
+    
+    text = (
+        f"🔗 <b>Партнерский кабинет менеджера</b>\n\n"
+        f"• <b>Твой статус:</b> {ref_status}\n"
+        f"• <b>Приглашено рефералов:</b> <code>{ref_count}</code> чел.\n"
+        f"• <b>Текущий баланс PRO:</b> <code>${user.partner_balance_usd or 0.0:.2f}</code>\n"
+        f"• <b>Выплатной TON-кошелек:</b> {wallet_str}\n\n"
+        f"📋 <b>Твоя персональная ссылка для привлечения клиентов:</b>\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"💡 <i>Нажмите на ссылку выше, чтобы скопировать её. Вы можете передавать её блогерам, "
+        f"закупать на неё рекламу или делиться с друзьями. Все переходы и оплаты будут "
+        f"жестко фиксироваться за вашим ID!</i>"
+    )
+    
+    kb = [[InlineKeyboardButton(text="◀️ Назад в админку", callback_data="adm_main_menu")]]
+    
+    try:
+        await callback.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    except Exception:
+        pass
 
 @admin_router.message(Command("admin"))
 async def cmd_admin(message: Message, db_session: AsyncSession):
