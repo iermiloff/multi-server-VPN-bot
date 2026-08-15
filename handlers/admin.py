@@ -638,3 +638,33 @@ async def cb_part_del(callback: CallbackQuery, db_session: AsyncSession):
         await callback.answer("Канал успешно удален!")
     await cb_adm_partners_list(callback, db_session)
 
+@admin_router.callback_query(F.data.startswith("adm_srv_del_"))
+async def cb_adm_srv_delete_finalize(callback: CallbackQuery, db_session: AsyncSession):
+    """Полное каскадное удаление ноды из СУБД бота и очистка связанных портов"""
+    server_id = int(callback.data.split("_")[-1])
+    
+    # 1. Ищем сервер в базе данных
+    srv = (await db_session.execute(
+        select(Server).where(Server.id == server_id)
+    )).scalar_one_or_none()
+    
+    if not srv:
+        await callback.answer("❌ Сервер уже удален или не найден.", show_alert=True)
+        return
+        
+    # 2. Очищаем все тарифные порты xray, привязанные к этому серверу
+    inbounds_to_del = (await db_session.execute(
+        select(TariffInbound).where(TariffInbound.server_id == server_id)
+    )).scalars().all()
+    
+    for ib in inbounds_to_del:
+        await db_session.delete(ib)
+        
+    # 3. Полностью удаляем сам сервер из базы данных
+    await db_session.delete(srv)
+    await db_session.commit()
+    
+    await callback.answer(f"🗑 Нода {srv.name} полностью удалена из системы!", show_alert=True)
+    
+    # 4. Обновляем интерфейс и возвращаем админа к списку серверов
+    await cb_adm_servers_list(callback, db_session)
