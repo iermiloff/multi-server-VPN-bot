@@ -105,7 +105,7 @@ async def cb_adm_my_ref_link(callback: CallbackQuery, db_session: AsyncSession):
     
     # Сборка ссылки
     bot_res = await callback.bot.get_me()
-    ref_link = f"https://t.me{bot_res.username}?start=ref{user_id}"
+    ref_link = f"https://t.me/{bot_res.username}?start=ref{user_id}"
     
     # Проверка статуса (теперь ошибка NoneType полностью невозможна)
     ref_status = "👑 PRO-Партнер (10% CPA в USD)" if user.is_pro_ref else "👥 Обычный (1:1 бонусные дни)"
