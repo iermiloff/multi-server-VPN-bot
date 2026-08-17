@@ -240,6 +240,22 @@ def get_price(plan_type: str, days: int) -> float:
     }
     return prices.get(plan_type, {}).get(days, 0.0)
 
+def get_price_rub(plan_type: str, days: int) -> float:
+    """Возвращает фиксированную стоимость тарифа в рублях из конфига"""
+    prices_rub = {
+        "base": {
+            30: config.PRICE_RUB_BASE_1_MONTH, 
+            90: config.PRICE_RUB_BASE_3_MONTHS, 
+            180: config.PRICE_RUB_BASE_6_MONTHS
+        },
+        "premium": {
+            30: config.PRICE_RUB_PREMIUM_1_MONTH, 
+            90: config.PRICE_RUB_PREMIUM_3_MONTHS, 
+            180: config.PRICE_RUB_PREMIUM_6_MONTHS
+        }
+    }
+    return prices_rub.get(plan_type, {}).get(days, 0.0)
+
 @user_router.callback_query(F.data == "menu_buy")
 async def cb_menu_buy(callback: CallbackQuery):
     """Экран витрины тарифов"""
