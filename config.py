@@ -21,17 +21,29 @@ class Settings(BaseSettings):
     CRYPTO_BOT_TOKEN: SecretStr
     CRYPTO_BOT_NET: bool = False
 
-    #LAVA
+    # LAVA
     LAVA_API_KEY: Optional[SecretStr] = None
     LAVA_OFFER_ID: Optional[str] = None
     
-    # Маркетинг платежей
+    # Курс конвертации
+    USD_RUB_RATE: float = 90.0
+
+    # Маркетинг платежей (Крипта / USD)
     PRICE_BASE_1_MONTH: float = 5.0
     PRICE_BASE_3_MONTHS: float = 13.5
     PRICE_BASE_6_MONTHS: float = 24.0
     PRICE_PREMIUM_1_MONTH: float = 8.0
     PRICE_PREMIUM_3_MONTHS: float = 21.6
     PRICE_PREMIUM_6_MONTHS: float = 38.4
+    
+    # Маркетинг платежей (Фиат / RUB для Lava.top)
+    PRICE_RUB_BASE_1_MONTH: float = 450.0
+    PRICE_RUB_BASE_3_MONTHS: float = 1200.0
+    PRICE_RUB_BASE_6_MONTHS: float = 2200.0
+    PRICE_RUB_PREMIUM_1_MONTH: float = 750.0
+    PRICE_RUB_PREMIUM_3_MONTHS: float = 2000.0
+    PRICE_RUB_PREMIUM_6_MONTHS: float = 3600.0
+
     PAYMENT_CURRENCY: str = "USDT"
     BRAND_NAME: str = "Overlord Multi-VPN"
 
@@ -41,7 +53,6 @@ class Settings(BaseSettings):
         """Универсальный парсер: обрабатывает строку, число или уже готовый список"""
         if not value:
             return []
-        # Если Pydantic уже распознал это как список 
         if isinstance(value, list):
             return [int(x) for x in value]
         if isinstance(value, int):
