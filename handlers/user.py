@@ -356,11 +356,21 @@ async def cb_pay_via_cryptobot_handler(callback: CallbackQuery, state: FSMContex
 
 @user_router.callback_query(F.data == "pay_via_lava")
 async def cb_lava_email_request(callback: CallbackQuery, state: FSMContext):
-    """Запрос email для Lava.top (требование стр. 29 документации)"""
+    """Запрос email для Lava.top с пересчетом цены в RUB"""
     await callback.answer()
+    
+    # Считываем выбранный ранее тариф и дни
+    data = await state.get_data()
+    plan_type = data.get("plan_type")
+    days = data.get("days")
+    
+    # Записываем в стейт актуальную цену в РУБЛЯХ для Lava
+    price_rub = get_price_rub(plan_type, days)
+    await state.update_data(price=price_rub)
+    
     await state.set_state(LavaPaymentStates.wait_for_email)
     await callback.message.edit_text(
-        text="📧 <b>Введите ваш Email для отправки чека:</b>\n\n"
+        text=" <b>Введите ваш Email для отправки чека:</b>\n\n"
              "<i>Lava.top официально требует указать почту для формирования фискального платежа.</i>"
     )
 
@@ -678,14 +688,13 @@ async def cb_check_lava_pull(callback: CallbackQuery, db_session: AsyncSession):
         await callback.message.edit_text("❌ Платеж отклонен или просрочен. Пожалуйста, создайте новый счет.")
         return
 
-    # --- СТАТУС СТРОГО "COMPLETED" (УСПЕШНАЯ ФИАТНАЯ ОПЛАТА) ---
-    await callback.message.edit_text("⏳ <b>Фиатный платеж подтвержден!</b> Нарезаем доступы...")
+    await callback.message.edit_text(" <b>Фиатный платеж подтвержден!</b> Нарезаем доступы...")
     
-    price = get_price(plan_type, days)
+    # ⚠️ Меняем на рублевую цену
+    price = get_price_rub(plan_type, days)
     now = datetime.datetime.utcnow()
     user = (await db_session.execute(select(User).where(User.telegram_id == user_id).options(selectinload(User.subscriptions)))).scalar_one()
-
-    # (Ниже идет наш стандартный, пуленепробиваемый алгоритм очередей, гибридной рефералки и flush нод Xray)
+    
     base_active = any(s.plan_type == "base" and s.is_active and s.expires_at > now and not s.is_pending for s in user.subscriptions)
     target_sub = next((s for s in user.subscriptions if s.plan_type == plan_type), None)
     is_pending_status = False
@@ -697,27 +706,40 @@ async def cb_check_lava_pull(callback: CallbackQuery, db_session: AsyncSession):
     else:
         is_pending_status = any(s.is_active and s.expires_at > now and not s.is_pending for s in user.subscriptions if s.plan_type != plan_type)
         msg_alert = f"Тариф {plan_type.upper()} продлен на {days} дней."
-
+        
     if target_sub:
-        if target_sub.is_active and target_sub.expires_at > now and not target_sub.is_pending: target_sub.expires_at += datetime.timedelta(days=days)
-        else: target_sub.expires_at = now + datetime.timedelta(days=days); target_sub.is_pending = is_pending_status; target_sub.is_active = True
+        if target_sub.is_active and target_sub.expires_at > now and not target_sub.is_pending: 
+            target_sub.expires_at += datetime.timedelta(days=days)
+        else: 
+            target_sub.expires_at = now + datetime.timedelta(days=days)
+            target_sub.is_pending = is_pending_status
+            target_sub.is_active = True
         active_sub_obj = target_sub
     else:
         new_sub = Subscription(user_id=user_id, plan_type=plan_type, expires_at=now + datetime.timedelta(days=days), is_pending=is_pending_status)
-        db_session.add(new_sub); active_sub_obj = new_sub
-
+        db_session.add(new_sub)
+        active_sub_obj = new_sub
+        
     await db_session.flush()
     
-    # Сплит гибридной партнерки (Пожизненный доход PRO и одноразовый для обычных друзей)
     past_payments = await db_session.scalar(select(func.count(PaymentLog.id)).where(PaymentLog.user_id == user_id)) or 0
     if user.referred_by:
         referrer = (await db_session.execute(select(User).where(User.telegram_id == user.referred_by).options(selectinload(User.subscriptions)))).scalar_one_or_none()
         if referrer:
             if referrer.is_pro_ref:
-                referrer.partner_balance_usd += (price * 0.10)
-                try: await callback.bot.send_message(chat_id=referrer.telegram_id, text=f"👑 <b>PRO-Начисление!</b> Твой реферал оплатил тариф {plan_type.upper()} через карту.\nТебе зачислено: <b>${price * 0.10:.2f}</b>")
+                # 🔄 Переводим рубли в доллары по курсу из конфига перед начислением процентов
+                price_usd = price / config.USD_RUB_RATE
+                partner_bonus = price_usd * 0.10
+                referrer.partner_balance_usd += partner_bonus
+                try: 
+                    await callback.bot.send_message(
+                        chat_id=referrer.telegram_id, 
+                        text=f" <b>PRO-Начисление!</b> Твой реферал оплатил тариф {plan_type.upper()} через карту.\nТебе зачислено: <b>${partner_bonus:.2f}</b>"
+                    )
                 except Exception: pass
             elif past_payments == 0:
+                # (Логика выдачи дней 1:1 остается без изменений...)
+
                 ref_target_sub = next((s for s in referrer.subscriptions if s.plan_type == plan_type), None)
                 if ref_target_sub:
                     if ref_target_sub.is_active and ref_target_sub.expires_at > now: ref_target_sub.expires_at += datetime.timedelta(days=days)
