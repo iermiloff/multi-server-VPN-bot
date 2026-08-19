@@ -26,7 +26,7 @@ class LavaPaymentStates(StatesGroup):
 logger = logging.getLogger(__name__)
 user_router = Router()
 
-ser_router.message.filter(F.chat.type == ChatType.PRIVATE)
+user_router.message.filter(F.chat.type == ChatType.PRIVATE)
 user_router.callback_query.filter(F.message.chat.type == ChatType.PRIVATE)
 
 async def check_main_channel_sub(bot: Bot, session: AsyncSession, user_id: int) -> bool:
